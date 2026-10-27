@@ -9,7 +9,7 @@
   'use strict';
   const HOOK_KEY = 'Game';
   const STORE_KEY = 'psbot.v1';
-  const VERSION = '1.3.0';   // 改程式時記得跟 manifest.json 一起改，面板標題會顯示，用來確認瀏覽器跑的是不是新版
+  const VERSION = '1.4.0';   // 改程式時記得跟 manifest.json 一起改，面板標題會顯示，用來確認瀏覽器跑的是不是新版
   const log = (...a) => console.log('%c[PSBot]', 'color:#ff8ad8', ...a);
 
   // ---------- 1. 抓命名空間 ----------
@@ -38,6 +38,8 @@
     restart: true,     // 結束後自動再來一局
     noRank: true,      // 掛機的局不上排行榜
     upgrade: false,    // 回主選單時自動花金幣買「強化」（會花掉金幣，預設關）
+    gacha: false,      // 回主選單時自動用抽獎券抽獎（預設關）
+    autoPartner: false,// 回主選單時自動換成最強的寶可夢出戰（預設關）
     passiveFirst: true,// 被動強化 > 主動招式升級
     // 每隻寶可夢的畢業配置：招式依序學習、依序建立羈絆；item = 想要的攜帶道具
     profiles: {
@@ -138,7 +140,7 @@
     trackHazards(ns);
 
     // --- 每 200ms 的雜務：切換主動欄位、用寶珠、自動再開一局、被暫停就繼續 ---
-    setInterval(() => { if (cfg.on) try { housekeeping(ns); autoUpgrade(ns); autoRestart(ns); autoResume(ns); } catch (e) { console.warn('[PSBot] tick', e); } }, 200);
+    setInterval(() => { if (cfg.on) try { housekeeping(ns); autoGacha(ns); autoPartner(ns); autoUpgrade(ns); autoRestart(ns); autoResume(ns); } catch (e) { console.warn('[PSBot] tick', e); } }, 200);
     log('patched');
   }
 
@@ -146,7 +148,7 @@
 
   // ---------- 4. 選卡邏輯 ----------
   const STAT_PRI = { atk: 60, cd: 55, def: 45, hp: 40, rgn: 35, xp: 30, mag: 25, spd: 15, heal: 5 };
-  const KIND_PRI = { nova: 12, aura: 12, orbit: 11, chain: 10, projectile: 9, boomerang: 8, beam: 8, meteor: 8, turret: 7, mine: 6, cone: 6, melee: 4, dash: 3, trail: 3 };
+  const KIND_PRI = { homing: 13, nova: 12, aura: 12, orbit: 11, chain: 10, projectile: 9, boomerang: 8, beam: 8, meteor: 8, turret: 7, mine: 6, cone: 6, melee: 4, dash: 3, trail: 3 };
 
   function profileOf(ns) {
     const p = ns.Game.player;
@@ -834,12 +836,25 @@
       return true;
     };
     // 開局招式
-    const want1 = prof && prof.moves.find(id => choices.includes(id));
+    // 沒有畢業配置的寶可夢：從可選的開局招式裡挑最適合掛機的輸出招（追蹤 > 範圍爆發 / 光環 > 繞身 …，要合物攻 / 特攻）
+    const autoPick = exclude => {
+      const mon = ns.DEX_BY[dex];
+      let best = null, bs = -1;
+      for (const id of choices) {
+        const m = ns.Moves.BY_ID[id];
+        if (!m || m.kind === 'buff' || id === exclude) continue;
+        const fit = m.cat ? ns.Stats.fit(mon, m.cat) : 1;
+        const sc = (KIND_PRI[m.kind] || 4) * fit + (m.type !== 'normal' ? 1 : 0);
+        if (sc > bs) { bs = sc; best = id; }
+      }
+      return best;
+    };
+    const want1 = prof ? prof.moves.find(id => choices.includes(id)) : autoPick();
     if (want1 && want1 !== ns.baseStartOf(dex)) {
       if (!upg.start) buy('start');
       if (upg.start && (sv.pstart || {})[dex] !== want1) { sv.pstart = sv.pstart || {}; sv.pstart[dex] = want1; bought.push('開局招式→' + want1); }
     }
-    const want2 = prof && prof.moves.find(id => choices.includes(id) && id !== want1);
+    const want2 = prof ? prof.moves.find(id => choices.includes(id) && id !== want1) : autoPick(want1);
     if (want2) {
       if (!upg.moves) buy('moves');
       if (upg.moves && !upg.start2) buy('start2');
@@ -863,6 +878,82 @@
       log('upgrade', ns.DEX_BY[dex].name, bought.join(', '), '剩', sv.coins);
       S.lastUpgradeMsg = bought.slice(-3).join('、');
     }
+  }
+
+  // ---------- 8a''. 自動抽獎 ----------
+  // 抽獎規則（遊戲原始碼）：一次 10 抽 = 10 張普通券或 1 張 ×10 券；普通 45% / 少見 30% / 稀有 17% / 史詩 6.5% / 傳說 1.5%；
+  // 每個地區 70 抽保底一隻傳說；抽到重複的退金幣。走遊戲自己的 Gacha.pull → 成就檢查 → 存檔，只是跳過動畫。
+  // 卡池：先抽保底進度最高的地區（集中拿傳說）；都沒進度時抽「還沒抽到的傳說最強」的地區
+  let lastGacha = 0;
+  function gachaBanner(ns, sv) {
+    const G = ns.Gacha;
+    let best = null, bs = -Infinity;
+    for (const b of G.BANNERS) {
+      if (!G.isOpen(b.gen)) continue;
+      const pity = (sv.pity || {})[b.gen] || 0;
+      // 還沒抽到的傳說裡最強那隻的能力總和（例：神奧的阿爾宙斯 720、關都的超夢 680）
+      const missing = (G.featured(b.gen) || []).filter(d => !sv.owned[d]).map(d => ns.DEX_BY[d].bst || 0);
+      const top = missing.length ? Math.max(...missing) : 0;
+      const sc = pity * 3 + (top ? 40 + (top - 600) / 5 : 0);
+      if (sc > bs) { bs = sc; best = b.gen; }
+    }
+    return best;
+  }
+  function autoGacha(ns) {
+    if (!cfg.gacha || ns.Game.state !== 'ui' || !ns.Gacha || !ns.DB || !ns.DB.save) return;
+    if (performance.now() - lastGacha < 5000) return;
+    lastGacha = performance.now();
+    const sv = ns.DB.save, t = sv.tickets || {};
+    const got = [];
+    let pulls = 0;
+    for (let i = 0; i < 30; i++) {
+      const type = (t.t10 || 0) >= 1 ? 't10' : (t.t1 || 0) >= 10 ? 't1' : null;
+      if (!type) break;
+      const gen = gachaBanner(ns, sv);
+      const res = gen && ns.Gacha.pull(sv, 10, gen, type);
+      if (!res) break;
+      pulls++;
+      for (const r of res) if (r.isNew || r.rarity >= 4) got.push(`${ns.DEX_BY[r.dex].name}${r.shiny ? '✨' : ''}${r.rarity >= 5 ? '★' : ''}`);
+    }
+    if (!pulls) return;
+    ns.Progress && ns.Progress.checkAch && ns.Progress.checkAch();
+    ns.DB.commit(true);
+    ns.UI.refreshCoins && ns.UI.refreshCoins();
+    log('gacha', pulls * 10, '抽', got.join(', '));
+    if (got.length) S.lastGachaMsg = got.slice(-4).join('、');
+  }
+
+  // ---------- 8a'''. 自動換最強的寶可夢出戰 ----------
+  // 強度 = 基礎能力總和 × (1 + 已投資的強化) × 招式池裡有沒有掛機好用的招（追蹤 / 光環 / 繞身 / 範圍爆發）。
+  // 強化是每隻分開的，換來換去會浪費投資，所以新的要強 15% 以上才換
+  function power(ns, sv, dex) {
+    const mon = ns.DEX_BY[dex];
+    if (!mon) return 0;
+    const u = (sv.pupg || {})[dex] || {};
+    const inv = 0.04 * (u.atk || 0) + 0.03 * (u.cd || 0) + 0.02 * (u.def || 0) + 0.01 * (u.hp || 0) + 0.015 * (u.crit || 0) + 0.01 * (u.regen || 0);
+    let pool = [];
+    try { pool = ns.startChoices ? ns.startChoices(dex) : []; } catch {}
+    const afk = pool.some(id => { const m = ns.Moves.BY_ID[id]; return m && ['homing', 'aura', 'orbit', 'nova'].includes(m.kind) && (!m.cat || ns.Stats.fit(mon, m.cat) >= 0.999); });
+    return (mon.bst || 300) * (1 + inv) * (afk ? 1 : 0.85);
+  }
+  let lastPartner = 0;
+  function autoPartner(ns) {
+    if (!cfg.autoPartner || ns.Game.state !== 'ui' || !ns.DB || !ns.DB.save) return;
+    if (performance.now() - lastPartner < 5000) return;
+    lastPartner = performance.now();
+    const sv = ns.DB.save, cur = sv.partner;
+    let best = cur, bp = power(ns, sv, cur);
+    for (const d of Object.keys(sv.owned || {})) {
+      const pw = power(ns, sv, +d);
+      if (pw > bp) { bp = pw; best = +d; }
+    }
+    if (best === cur || bp < power(ns, sv, cur) * 1.15) return;
+    sv.partner = best;
+    sv.partnerShiny = !!(sv.shiny && sv.shiny[best]);
+    ns.DB.commit();
+    log('partner', ns.DEX_BY[cur] && ns.DEX_BY[cur].name, '→', ns.DEX_BY[best].name);
+    S.lastPartnerMsg = `換成 ${ns.T ? ns.T(ns.DEX_BY[best].name) : ns.DEX_BY[best].name}`;
+    ns.Flow && ns.Flow.goMenu && ns.Flow.goMenu();
   }
 
   // ---------- 8b. 結算後回主選單 → 自動再開一局 ----------
@@ -956,6 +1047,8 @@
     <label><input type="checkbox" data-o="restart">結束後自動再開一局</label>
     <label><input type="checkbox" data-o="noRank">掛機局不上排行榜</label>
     <label><input type="checkbox" data-o="upgrade">回主選單時自動買強化（花金幣）</label>
+    <label><input type="checkbox" data-o="gacha">回主選單時自動抽獎（用抽獎券）</label>
+    <label><input type="checkbox" data-o="autoPartner">自動換最強的寶可夢出戰</label>
   </div></details>
   <details data-k="buildBox" open><summary data-k="ptitle">畢業配置</summary>
     <div class="chips" data-k="build"></div>
@@ -1039,7 +1132,8 @@
       const run = inRun ? `Lv${p.level} · HP ${Math.round(p.hp)}/${Math.round(p.maxHp)} · 擊倒 ${p.kills} · 羈絆券 ${p.bonds} · ${cfg.on ? S.mode || '' : '暫停'}\n欄位：${p.slots.map((g, i) => (i === p.active ? '▶' : '') + g.map(m => mvName(m.id)).join('+')).join(' | ')}` : '不在遊戲中';
       const mins = Math.round((Date.now() - stats.startedAt) / 60000);
       // 遊戲的 CSS 會吃掉換行，所以一行一個 div
-      const lines = `${run}\n本次掛機 ${mins} 分：${stats.runs} 局，擊倒 ${stats.kills}，金幣 ${stats.coins}`.split('\n');
+      const extra = [S.lastPartnerMsg && '夥伴：' + S.lastPartnerMsg, S.lastUpgradeMsg && '強化：' + S.lastUpgradeMsg, S.lastGachaMsg && '抽到：' + S.lastGachaMsg].filter(Boolean);
+      const lines = `${run}\n本次掛機 ${mins} 分：${stats.runs} 局，擊倒 ${stats.kills}，金幣 ${stats.coins}`.split('\n').concat(extra);
       $('status').replaceChildren(...lines.map(t => Object.assign(document.createElement('div'), { textContent: t })));
     }, 500);
   }
