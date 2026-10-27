@@ -2,7 +2,7 @@
 // @name         PokéSurvivor 自動掛機 (PSBot)
 // @name:en      PokéSurvivor Auto-Farm (PSBot)
 // @namespace    https://github.com/BoundlessEgret/pokesurvivor-autofarm
-// @version      1.2.0
+// @version      1.3.0
 // @description  PokéSurvivor 自動走位躲招、選卡、綁羈絆、進神祕裂縫、處理事件（Gholdengo、求救、祭壇…）、自動再開一局
 // @description:en Auto movement & dodging, card picks, bonds, rifts, events (Gholdengo, rescues, altars…) and auto restart for PokéSurvivor
 // @author       BoundlessEgret
@@ -27,7 +27,7 @@
   'use strict';
   const HOOK_KEY = 'Game';
   const STORE_KEY = 'psbot.v1';
-  const VERSION = '1.2.0';   // 改程式時記得跟 manifest.json 一起改，面板標題會顯示，用來確認瀏覽器跑的是不是新版
+  const VERSION = '1.3.0';   // 改程式時記得跟 manifest.json 一起改，面板標題會顯示，用來確認瀏覽器跑的是不是新版
   const log = (...a) => console.log('%c[PSBot]', 'color:#ff8ad8', ...a);
 
   // ---------- 1. 抓命名空間 ----------
@@ -55,10 +55,12 @@
     orbs: true,        // 危急 / 首領戰自動用寶珠
     restart: true,     // 結束後自動再來一局
     noRank: true,      // 掛機的局不上排行榜
+    upgrade: false,    // 回主選單時自動花金幣買「強化」（會花掉金幣，預設關）
     passiveFirst: true,// 被動強化 > 主動招式升級
     // 每隻寶可夢的畢業配置：招式依序學習、依序建立羈絆；item = 想要的攜帶道具
     profiles: {
       150: { moves: ['confusion', 'harden', 'nasty-plot', 'psychic'], item: 'shellbell' }, // 超夢
+      1: { moves: ['energy-ball', 'nasty-plot', 'leaf-storm', 'giga-drain'], item: 'shellbell' },  // 妙蛙種子（要先買「初始招式」把藤鞭換成能量球）
     },
     panelX: null, panelY: null, collapsed: false,
   };
@@ -154,7 +156,7 @@
     trackHazards(ns);
 
     // --- 每 200ms 的雜務：切換主動欄位、用寶珠、自動再開一局、被暫停就繼續 ---
-    setInterval(() => { if (cfg.on) try { housekeeping(ns); autoRestart(ns); autoResume(ns); } catch (e) { console.warn('[PSBot] tick', e); } }, 200);
+    setInterval(() => { if (cfg.on) try { housekeeping(ns); autoUpgrade(ns); autoRestart(ns); autoResume(ns); } catch (e) { console.warn('[PSBot] tick', e); } }, 200);
     log('patched');
   }
 
@@ -823,6 +825,64 @@
     return S.out;
   }
 
+  // ---------- 8a'. 養成：回主選單時自動買「強化」 ----------
+  // 強化是每隻寶可夢各自的（存檔 pupg[圖鑑編號]），價格 = 10 × round(base × grow^等級 / 10)。
+  // 1. 「初始招式」：畢業配置第一招跟預設開局招式不同時先買，並設定開局招式（存檔 pstart）。
+  //    例：妙蛙種子預設藤鞭，換成能量球，配置才排得下 4 招
+  // 2. 「招式庫」(1500)+「第二初始招式」：回主選單時錢夠就先買，第二招設成配置裡下一個能當開局的招式（存檔 pstart2）
+  // 3. 其他：每次挑「價值 ÷ 價格」最高、買得起的一項，一直買到錢不夠
+  const UPG_VALUE = { def: 1.2, atk: 1.1, cd: 1.1, coins: 1.1, reroll: 1.0, hp: 0.9, crit: 0.8, regen: 0.8, xp: 0.6, magnet: 0.5, spd: 0.4 };
+  const UPG_CAP = { coins: 5, magnet: 3, xp: 4, reroll: 3 };   // 這幾項只升到這裡就夠了
+  let lastUpgrade = 0;
+  function autoUpgrade(ns) {
+    if (!cfg.upgrade || ns.Game.state !== 'ui' || !ns.Upgrades || !ns.DB || !ns.DB.save) return;
+    if (performance.now() - lastUpgrade < 3000) return;
+    lastUpgrade = performance.now();
+    const sv = ns.DB.save, dex = sv.partner;
+    if (!dex || !ns.DEX_BY[dex]) return;
+    const upg = ns.DB.upgradesOf(dex), U = ns.Upgrades, prof = cfg.profiles[dex];
+    const choices = ns.startChoices ? ns.startChoices(dex) : [];
+    const bought = [];
+    const buy = id => {
+      const lvl = upg[id] || 0, def = U.BY[id];
+      if (!def || lvl >= def.max || (def.needs && !upg[def.needs])) return false;
+      const cost = U.cost(id, lvl);
+      if (sv.coins < cost) return false;
+      sv.coins -= cost; upg[id] = lvl + 1; bought.push(`${def.name} ${lvl + 1}`);
+      return true;
+    };
+    // 開局招式
+    const want1 = prof && prof.moves.find(id => choices.includes(id));
+    if (want1 && want1 !== ns.baseStartOf(dex)) {
+      if (!upg.start) buy('start');
+      if (upg.start && (sv.pstart || {})[dex] !== want1) { sv.pstart = sv.pstart || {}; sv.pstart[dex] = want1; bought.push('開局招式→' + want1); }
+    }
+    const want2 = prof && prof.moves.find(id => choices.includes(id) && id !== want1);
+    if (want2) {
+      if (!upg.moves) buy('moves');
+      if (upg.moves && !upg.start2) buy('start2');
+      if (upg.start2 && (sv.pstart2 || {})[dex] !== want2) { sv.pstart2 = sv.pstart2 || {}; sv.pstart2[dex] = want2; bought.push('第二開局招式→' + want2); }
+    }
+    for (let guard = 0; guard < 50; guard++) {
+      let best = null, bs = 0;
+      for (const [id, v] of Object.entries(UPG_VALUE)) {
+        const def = U.BY[id], lvl = upg[id] || 0;
+        if (!def || lvl >= Math.min(def.max, UPG_CAP[id] ?? def.max)) continue;
+        const cost = U.cost(id, lvl);
+        if (cost > sv.coins) continue;
+        const sc = v / cost;
+        if (sc > bs) { bs = sc; best = id; }
+      }
+      if (!best || !buy(best)) break;
+    }
+    if (bought.length) {
+      ns.DB.commit(true);
+      ns.UI.refreshCoins && ns.UI.refreshCoins();
+      log('upgrade', ns.DEX_BY[dex].name, bought.join(', '), '剩', sv.coins);
+      S.lastUpgradeMsg = bought.slice(-3).join('、');
+    }
+  }
+
   // ---------- 8b. 結算後回主選單 → 自動再開一局 ----------
   function autoRestart(ns) {
     if (!cfg.on || !cfg.restart || !['ui', 'over'].includes(ns.Game.state)) return;
@@ -913,6 +973,7 @@
     <label><input type="checkbox" data-o="orbs">自動用寶珠</label>
     <label><input type="checkbox" data-o="restart">結束後自動再開一局</label>
     <label><input type="checkbox" data-o="noRank">掛機局不上排行榜</label>
+    <label><input type="checkbox" data-o="upgrade">回主選單時自動買強化（花金幣）</label>
   </div></details>
   <details data-k="buildBox" open><summary data-k="ptitle">畢業配置</summary>
     <div class="chips" data-k="build"></div>
