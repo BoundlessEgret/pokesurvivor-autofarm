@@ -9,7 +9,7 @@
   'use strict';
   const HOOK_KEY = 'Game';
   const STORE_KEY = 'psbot.v1';
-  const VERSION = '1.1.0';   // 改程式時記得跟 manifest.json 一起改，面板標題會顯示，用來確認瀏覽器跑的是不是新版
+  const VERSION = '1.2.0';   // 改程式時記得跟 manifest.json 一起改，面板標題會顯示，用來確認瀏覽器跑的是不是新版
   const log = (...a) => console.log('%c[PSBot]', 'color:#ff8ad8', ...a);
 
   // ---------- 1. 抓命名空間 ----------
@@ -834,6 +834,30 @@
   }
 
   // ---------- 9. 控制面板 ----------
+  // ---------- 新版提示（只有 Chrome 擴充版需要：油猴會自己更新） ----------
+  // 每 6 小時最多問一次 GitHub 最新的 Release，有更新的版本就在面板上顯示下載連結
+  const REPO = 'BoundlessEgret/pokesurvivor-autofarm';
+  const newer = (a, b) => { const x = a.split('.').map(Number), y = b.split('.').map(Number); for (let i = 0; i < 3; i++) if ((x[i] || 0) !== (y[i] || 0)) return (x[i] || 0) > (y[i] || 0); return false; };
+  async function checkUpdate(link) {
+    if (typeof GM_info !== 'undefined') return;   // 油猴腳本
+    let cache = {};
+    try { cache = JSON.parse(localStorage.getItem('psbot.update') || '{}'); } catch {}
+    if (!cache.at || Date.now() - cache.at > 6 * 3600e3) {
+      try {
+        const r = await fetch(`https://api.github.com/repos/${REPO}/releases/latest`, { headers: { Accept: 'application/vnd.github+json' } });
+        if (r.ok) { const j = await r.json(); cache = { at: Date.now(), latest: String(j.tag_name || '').replace(/^v/, ''), url: j.html_url }; }
+        else cache = { at: Date.now(), latest: cache.latest, url: cache.url };
+        localStorage.setItem('psbot.update', JSON.stringify(cache));
+      } catch {}
+    }
+    if (cache.latest && newer(cache.latest, VERSION)) {
+      link.href = cache.url || `https://github.com/${REPO}/releases/latest`;
+      link.textContent = `有新版本 v${cache.latest}（目前 v${VERSION}），點這裡下載`;
+      link.style.display = 'block';
+      log('update available', cache.latest);
+    }
+  }
+
   function buildPanel(ns) {
     const css = `
 #psbot{position:fixed;z-index:2147483000;top:${cfg.panelY ?? 64}px;left:${cfg.panelX ?? 12}px;width:230px;color:#e8ecf6;background:rgba(14,18,32,.9);border:1px solid #3a4466;border-radius:8px;box-shadow:0 4px 16px rgba(0,0,0,.45);user-select:none}
@@ -877,9 +901,11 @@
     <div class="row"><select data-k="pool"></select><button data-k="add">加入</button></div>
     <div class="row"><select data-k="item"></select><button data-k="clear">清空</button></div>
   </details>
+  <a data-k="update" target="_blank" rel="noopener" style="display:none;color:#ffd23f!important;text-decoration:underline"></a>
   <div class="st">F8 開關 · 分頁要保持可見</div>
 </div>`;
     document.body.appendChild(el);
+    checkUpdate(el.querySelector('[data-k="update"]'));
     const $ = k => el.querySelector(`[data-k="${k}"]`);
 
     const setOn = v => { cfg.on = v; save(); $('toggle').textContent = v ? 'ON' : 'OFF'; $('toggle').classList.toggle('on', v); };
