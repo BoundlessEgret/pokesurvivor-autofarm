@@ -2,7 +2,7 @@
 // @name         PokéSurvivor 自動掛機 (PSBot)
 // @name:en      PokéSurvivor Auto-Farm (PSBot)
 // @namespace    https://github.com/BoundlessEgret/pokesurvivor-autofarm
-// @version      1.4.0
+// @version      1.5.0
 // @description  PokéSurvivor 自動走位躲招、選卡、綁羈絆、進神祕裂縫、處理事件（Gholdengo、求救、祭壇…）、自動再開一局
 // @description:en Auto movement & dodging, card picks, bonds, rifts, events (Gholdengo, rescues, altars…) and auto restart for PokéSurvivor
 // @author       BoundlessEgret
@@ -27,7 +27,7 @@
   'use strict';
   const HOOK_KEY = 'Game';
   const STORE_KEY = 'psbot.v1';
-  const VERSION = '1.4.0';   // 改程式時記得跟 manifest.json 一起改，面板標題會顯示，用來確認瀏覽器跑的是不是新版
+  const VERSION = '1.5.0';   // 改程式時記得跟 manifest.json 一起改，面板標題會顯示，用來確認瀏覽器跑的是不是新版
   const log = (...a) => console.log('%c[PSBot]', 'color:#ff8ad8', ...a);
 
   // ---------- 1. 抓命名空間 ----------
@@ -58,11 +58,14 @@
     upgrade: false,    // 回主選單時自動花金幣買「強化」（會花掉金幣，預設關）
     gacha: false,      // 回主選單時自動用抽獎券抽獎（預設關）
     autoPartner: false,// 回主選單時自動換成最強的寶可夢出戰（預設關）
+    // 想養的寶可夢（圖鑑編號）：抽獎優先抽有牠們的地區，抽到就優先出戰。預設蓋歐卡、超夢（實測最強的兩隻）
+    favorites: [382, 150],
     passiveFirst: true,// 被動強化 > 主動招式升級
     // 每隻寶可夢的畢業配置：招式依序學習、依序建立羈絆；item = 想要的攜帶道具
     profiles: {
       150: { moves: ['confusion', 'harden', 'nasty-plot', 'psychic'], item: 'shellbell' }, // 超夢
       1: { moves: ['energy-ball', 'nasty-plot', 'leaf-storm', 'giga-drain'], item: 'shellbell' },  // 妙蛙種子（要先買「初始招式」把藤鞭換成能量球）
+      382: { moves: ['bubble', 'nasty-plot', 'aqua-ring', 'hydro-pump'], item: 'shellbell' },       // 蓋歐卡（開局從水槍換成泡沫；水流環 = 常駐回血）
     },
     panelX: null, panelY: null, collapsed: false,
   };
@@ -912,7 +915,9 @@
       // 還沒抽到的傳說裡最強那隻的能力總和（例：神奧的阿爾宙斯 720、關都的超夢 680）
       const missing = (G.featured(b.gen) || []).filter(d => !sv.owned[d]).map(d => ns.DEX_BY[d].bst || 0);
       const top = missing.length ? Math.max(...missing) : 0;
-      const sc = pity * 3 + (top ? 40 + (top - 600) / 5 : 0);
+      // 這個地區還有沒抽到的「想養的寶可夢」：最優先（例：蓋歐卡在豐緣、超夢在關都）
+      const wantHere = (cfg.favorites || []).some(d => !sv.owned[d] && ns.DEX_BY[d] && ns.DEX_BY[d].gen === b.gen);
+      const sc = pity * 3 + (top ? 40 + (top - 600) / 5 : 0) + (wantHere ? 200 : 0);
       if (sc > bs) { bs = sc; best = b.gen; }
     }
     return best;
@@ -942,17 +947,34 @@
   }
 
   // ---------- 8a'''. 自動換最強的寶可夢出戰 ----------
-  // 強度 = 基礎能力總和 × (1 + 已投資的強化) × 招式池裡有沒有掛機好用的招（追蹤 / 光環 / 繞身 / 範圍爆發）。
-  // 強化是每隻分開的，換來換去會浪費投資，所以新的要強 15% 以上才換
+  // 傷害公式（遊戲原始碼）：招式威力 × 攻擊倍率 × 物攻/特攻合不合 × 增益 × 單屬性同屬性招式 1.2 × 天氣（雨天水系 1.5…）。
+  // 所以強度看「最好的那招掛機招能打多痛」，不是能力總和：蓋歐卡（特攻 1.52 × 純水 1.2 × 自帶降雨 1.5 = 2.74）
+  // 遠勝能力總和最高的阿爾宙斯（1.36）。再乘耐久、速度、已投資的強化；想養的寶可夢再加 30%。
+  // 強化是每隻分開的，新的要強 15% 以上才換
+  const WEATHER_OF = { drizzle: 'water', drought: 'fire', 'sand-stream': 'rock', 'snow-warning': 'ice' };
+  const WEATHER_MUL = { water: 1.5, fire: 1.5, rock: 1.3, ice: 1.3 };
+  const AFK_KINDS = ['homing', 'aura', 'orbit', 'nova'];
   function power(ns, sv, dex) {
     const mon = ns.DEX_BY[dex];
     if (!mon) return 0;
-    const u = (sv.pupg || {})[dex] || {};
-    const inv = 0.04 * (u.atk || 0) + 0.03 * (u.cd || 0) + 0.02 * (u.def || 0) + 0.01 * (u.hp || 0) + 0.015 * (u.crit || 0) + 0.01 * (u.regen || 0);
     let pool = [];
     try { pool = ns.startChoices ? ns.startChoices(dex) : []; } catch {}
-    const afk = pool.some(id => { const m = ns.Moves.BY_ID[id]; return m && ['homing', 'aura', 'orbit', 'nova'].includes(m.kind) && (!m.cat || ns.Stats.fit(mon, m.cat) >= 0.999); });
-    return (mon.bst || 300) * (1 + inv) * (afk ? 1 : 0.85);
+    const abil = ((ns.DEX_ABIL && ns.DEX_ABIL[dex]) || []).filter(Boolean);
+    let off = 0;
+    for (const id of pool) {
+      const m = ns.Moves.BY_ID[id];
+      if (!m || !(AFK_KINDS.includes(m.kind) || (m.kind === 'projectile' && m.homing))) continue;   // 念力是「會追蹤的投射物」
+      let v = (mon.atk || 1) * (m.cat ? ns.Stats.fit(mon, m.cat) : 1);
+      if (mon.types.length === 1 && m.type === mon.types[0]) v *= 1.2;
+      for (const a of abil) if (WEATHER_OF[a] === m.type) v *= WEATHER_MUL[m.type];
+      off = Math.max(off, v);
+    }
+    if (!off) off = (mon.atk || 1) * 0.6;   // 沒有不用瞄準的招
+    const tough = Math.sqrt((mon.hp || 80) / 100 * (((mon.df || 60) + (mon.sd || 60)) / 180));
+    const u = (sv.pupg || {})[dex] || {};
+    const inv = 0.04 * (u.atk || 0) + 0.03 * (u.cd || 0) + 0.02 * (u.def || 0) + 0.01 * (u.hp || 0) + 0.015 * (u.crit || 0) + 0.01 * (u.regen || 0);
+    const fav = (cfg.favorites || []).includes(dex) ? 1.3 : 1;
+    return off * Math.sqrt(tough) * (0.8 + 0.2 * (mon.spd || 100) / 110) * (1 + inv) * fav;
   }
   let lastPartner = 0;
   function autoPartner(ns) {
