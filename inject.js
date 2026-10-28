@@ -9,7 +9,7 @@
   'use strict';
   const HOOK_KEY = 'Game';
   const STORE_KEY = 'psbot.v1';
-  const VERSION = '1.6.3';   // 改程式時記得跟 manifest.json 一起改，面板標題會顯示，用來確認瀏覽器跑的是不是新版
+  const VERSION = '1.6.4';   // 改程式時記得跟 manifest.json 一起改，面板標題會顯示，用來確認瀏覽器跑的是不是新版
   const log = (...a) => console.log('%c[PSBot]', 'color:#ff8ad8', ...a);
 
   // ---------- 1. 抓命名空間 ----------
@@ -939,31 +939,43 @@
       return true;
     };
     // 開局招式
-    // 沒有畢業配置的寶可夢：從可選的開局招式裡挑最適合掛機的輸出招（追蹤 > 範圍爆發 / 光環 > 繞身 …，要合物攻 / 特攻）
+    // 沒有畢業配置的寶可夢：開局一定挑「單體」攻擊招（水槍、念力、火花…），索敵穩、後期打首領收尾靠它；
+    // 範圍招留到第四招。單體招裡挑每秒傷害最高、物攻 / 特攻對得上的，會追蹤 / 同屬性再加一點
+    const single = m => (m.kind === 'projectile' && (m.count || 1) <= 2) || m.kind === 'homing' || m.kind === 'beam';
     const autoPick = exclude => {
       const mon = ns.DEX_BY[dex];
-      let best = null, bs = -1;
+      let best = null, bs = -Infinity;
       for (const id of choices) {
         const m = ns.Moves.BY_ID[id];
         if (!m || m.kind === 'buff' || id === exclude) continue;
         const fit = m.cat ? ns.Stats.fit(mon, m.cat) : 1;
-        const sc = (KIND_PRI[m.kind] || 4) * fit + (m.type !== 'normal' ? 1 : 0);
+        const sc = (single(m) ? 1000 : 0) + (m.dmg || 10) / (m.cd || 1) * fit * ((mon.types || []).includes(m.type) ? 1.2 : 1) + (m.homing || m.kind === 'homing' ? 3 : 0);
         if (sc > bs) { bs = sc; best = id; }
       }
       return best;
     };
+    // 只改 bot 自己設過的開局招式：玩家自己在遊戲裡改過（跟 bot 記下的不一樣）就不再碰。
+    // 舊版沒有記錄、而且設成範圍招的（例：蓋歐卡被設成泡沫），當成 bot 設的，換成單體招一次
+    cfg.botStart = cfg.botStart || {}; cfg.botStart2 = cfg.botStart2 || {};
+    const mine = (store, rec, legacyOk) => store[dex] === undefined || store[dex] === rec[dex] || (rec[dex] === undefined && legacyOk(store[dex]));
     const want1 = prof ? prof.moves.find(id => choices.includes(id)) : autoPick();
-    if (want1 && want1 !== ns.baseStartOf(dex)) {
-      if (!upg.start) buy('start');
-      if (upg.start && (sv.pstart || {})[dex] !== want1) { sv.pstart = sv.pstart || {}; sv.pstart[dex] = want1; bought.push('開局招式→' + want1); }
+    sv.pstart = sv.pstart || {};
+    if (want1 && mine(sv.pstart, cfg.botStart, id => !ns.Moves.BY_ID[id] || !single(ns.Moves.BY_ID[id]))) {
+      if (want1 !== ns.baseStartOf(dex) && !upg.start) buy('start');
+      if (upg.start && sv.pstart[dex] !== want1 && !(sv.pstart[dex] === undefined && want1 === ns.baseStartOf(dex))) {
+        sv.pstart[dex] = want1; bought.push('開局招式→' + want1);
+      }
+      if (sv.pstart[dex] !== undefined) cfg.botStart[dex] = sv.pstart[dex];
     }
     // 第二開局招式照學招順序：自動模式是變硬（可以當開局招式的話），不行才挑第二招攻擊
     const want2 = prof ? prof.moves.find(id => choices.includes(id) && id !== want1) : choices.includes('harden') ? 'harden' : autoPick(want1);
-    if (want2) {
+    sv.pstart2 = sv.pstart2 || {};
+    if (want2 && mine(sv.pstart2, cfg.botStart2, () => false)) {
       if (!upg.moves) buy('moves');
       if (upg.moves && !upg.start2) buy('start2');
-      if (upg.start2 && (sv.pstart2 || {})[dex] !== want2) { sv.pstart2 = sv.pstart2 || {}; sv.pstart2[dex] = want2; bought.push('第二開局招式→' + want2); }
+      if (upg.start2 && sv.pstart2[dex] !== want2) { sv.pstart2[dex] = want2; cfg.botStart2[dex] = want2; bought.push('第二開局招式→' + want2); }
     }
+    save();
     for (let guard = 0; guard < 50; guard++) {
       let best = null, bs = 0;
       for (const [id, v] of Object.entries(UPG_VALUE)) {
