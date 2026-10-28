@@ -9,7 +9,7 @@
   'use strict';
   const HOOK_KEY = 'Game';
   const STORE_KEY = 'psbot.v1';
-  const VERSION = '1.5.0';   // 改程式時記得跟 manifest.json 一起改，面板標題會顯示，用來確認瀏覽器跑的是不是新版
+  const VERSION = '1.6.0';   // 改程式時記得跟 manifest.json 一起改，面板標題會顯示，用來確認瀏覽器跑的是不是新版
   const log = (...a) => console.log('%c[PSBot]', 'color:#ff8ad8', ...a);
 
   // ---------- 1. 抓命名空間 ----------
@@ -150,7 +150,9 @@
   function schedule(fn, ms) { setTimeout(() => { try { fn(); } catch (e) { console.warn('[PSBot]', e); } }, ms); }
 
   // ---------- 4. 選卡邏輯 ----------
-  const STAT_PRI = { atk: 60, cd: 55, def: 45, hp: 40, rgn: 35, xp: 30, mag: 25, spd: 15, heal: 5 };
+  // 學習（經驗 ×1.12，最多 8 張 = ×2.48）越早拿越賺，排第一；磁鐵（吸取範圍 ×1.3）拿到約 260px 前也很優先，
+  // 範圍大了光球會自己飛過來，不用一顆一顆跑去撿，省下來的時間都在打怪
+  const STAT_PRI = { xp: 74, atk: 60, cd: 55, def: 45, hp: 40, rgn: 35, mag: 25, spd: 15, heal: 5 };
   const KIND_PRI = { homing: 13, nova: 12, aura: 12, orbit: 11, chain: 10, projectile: 9, boomerang: 8, beam: 8, meteor: 8, turret: 7, mine: 6, cone: 6, melee: 4, dash: 3, trail: 3 };
 
   function profileOf(ns) {
@@ -197,8 +199,8 @@
       if (id === 'heal') return lowHp ? 950 : 10;
       if (c.color === '#ffd23f') return 980;          // 拿了馬上進化，只輸給「進化」本身
       if (evoNeeds.has(id)) return 700;               // 先拿好進化要的被動，招式滿級時就能直接進化
-      // 護甲（每張 -6% 受到傷害，上限 70%）是撐到第 30 分鐘最值錢的被動，沒滿之前排第一
-      const pri = id === 'def' && (p.dmgReduce || 0) < 0.69 ? 70 : (STAT_PRI[id] || 20);
+      // 學習 > 磁鐵（範圍小時）> 護甲（每張 -6% 受到傷害，上限 70%，撐到第 30 分鐘要靠它）
+      const pri = id === 'def' && (p.dmgReduce || 0) < 0.69 ? 70 : id === 'mag' && (p.magnet || 78) < 260 ? 72 : (STAT_PRI[id] || 20);
       return (cfg.passiveFirst ? 500 : 300) + pri;
     }
     if (type === 'up') {
@@ -253,7 +255,7 @@
   }
 
   // ---------- 6. 道具 ----------
-  const ITEM_PRI = ['shellbell', 'leftovers', 'quickclaw', 'focussash', 'assaultvest', 'rockyhelmet', 'luckyegg', 'amuletcoin', 'choicescarf', 'lifeorb', 'choiceband'];
+  const ITEM_PRI = ['shellbell', 'luckyegg', 'leftovers', 'quickclaw', 'focussash', 'assaultvest', 'rockyhelmet', 'amuletcoin', 'choicescarf', 'lifeorb', 'choiceband'];
   function itemRank(ns, id) {
     const prof = profileOf(ns);
     if (prof && prof.item === id) return -1;
@@ -474,41 +476,54 @@
       return { x: wp.x, y: wp.y, fx: c.x, fy: c.y, w: 6, mode: c.mode, chase: c.chase, hold: c.hold, until: c.until, escort: c.escort, direct: c.direct };
     }
     const W = ns.World;
-    // 跟著光球走：挑「附近光球總價值 / 距離」最高的那一團，一路掃過去。
-    // 念力會自動鎖敵，所以血量健康時不管旁邊有沒有怪，直接衝
-    const wOf = k => k.kind === 'heal' ? (hpPct < 0.7 ? 8 : 0.2) : (PICK_W[k.kind] ?? 1);
+    // 撿光球：挑一團「總價值 / 距離」最高的，把那一團的位置固定下來一路走過去，
+    // 走到磁吸範圍蓋住它（或撿完、或超時）才換下一團。
+    // 舊版每幀把目標改成「那一團裡離我最近的那顆」，光球一被吸走目標就跳一次，人就左右抽搐
+    const mag = p.magnet || 78;
+    const gt = ns.Game.st.time;
+    const pSpd = (p.baseSpd || 100) * (p.spdMul || 1);
     const traps = ((W && W.specialsNear && W.specialsNear(p.x, p.y, 600)) || []).filter(t => t.type === 'trap');
     const onTrap = k => traps.some(t => (k.x - t.x) ** 2 + (k.y - t.y + 8) ** 2 < 23 * 23);
     // 掉在陷阱上的球不撿（走進磁吸範圍就會自己飛過來，不用踩上去）
-    // 身後拖著一長串怪時只撿附近 220px 內的球，遠的下一圈經過自然會吸到，不用為了它脫離圈子
-    // 前期（前 5 分鐘）不管怪多少都追光球；之後身後拖著一長串怪時才只撿附近的
-    const crowded = ns.Game.st.time > 300 && enemies.length >= 6;
-    const items = ns.Pickups.all().filter(k => !k.pulled && !(k.kind === 'heal' && hpPct >= 0.95) && !onTrap(k)
-      && (!crowded || k.kind === 'heal' || k.kind.startsWith('ticket') || k.kind === 'item' || Math.hypot(k.x - p.x, k.y - p.y) < 220));
-    // 正在撿的那一團還有剩、而且就在附近：先撿乾淨再換下一團，免得之後又跑回來
-    if (S.orbGoal) {
-      let rest = null, rd = 260;
-      for (const k of items) {
-        if (Math.abs(k.x - S.orbGoal.x) > 110 || Math.abs(k.y - S.orbGoal.y) > 110) continue;
-        const d = Math.hypot(k.x - p.x, k.y - p.y);
-        if (d < rd) { rd = d; rest = k; }
-      }
-      if (rest) return (S.orbGoal = { x: rest.x, y: rest.y, w: 2, mode: '撿光球', orb: true });
+    // 前期（前 5 分鐘）不管怪多少都追光球；之後身後拖著一長串怪時只撿附近的，遠的下一圈經過自然會吸到
+    const crowded = gt > 300 && enemies.length >= 6;
+    const all = ns.Pickups.all();
+    // 「磁鐵」道具會把全地圖的光球一次吸過來：地上光球越多越值得去撿
+    let loose = 0;
+    for (const k of all) if (!k.pulled && (k.kind === 'xp' || k.kind === 'xpBig')) loose += k.kind === 'xpBig' ? 3 : 1;
+    const wOf = k => k.kind === 'heal' ? (hpPct < 0.7 ? 8 : 0.2) : k.kind === 'magnet' ? 5 + loose * 0.4 : (PICK_W[k.kind] ?? 1);
+    const items = all.filter(k => !k.pulled && !(k.kind === 'heal' && hpPct >= 0.95) && !onTrap(k)
+      && (!crowded || k.kind === 'heal' || k.kind === 'magnet' || k.kind.startsWith('ticket') || k.kind === 'item' || Math.hypot(k.x - p.x, k.y - p.y) < 220 + mag));
+    const clR = Math.max(90, mag * 0.8);   // 一團的範圍：站在中心時磁吸大概蓋得住
+    const g = S.orbGoal;
+    if (g && gt < g.until) {
+      const d = Math.hypot(g.x - p.x, g.y - p.y);
+      let left = 0;
+      for (const k of items) if (Math.abs(k.x - g.x) < clR && Math.abs(k.y - g.y) < clR) left += wOf(k);
+      if (left > 0 && d > Math.max(16, mag * 0.45)) return { x: g.x, y: g.y, w: 2, mode: '撿光球', orb: true };
     }
     let best = null, bestS = 0;
+    const [ox, oy] = S.out || [0, 0];
     for (const k of items) {
-      const d = Math.hypot(k.x - p.x, k.y - p.y);
+      const dx = k.x - p.x, dy = k.y - p.y, d = Math.hypot(dx, dy);
+      if (d < mag * 0.9 && k.kind !== 'heal') continue;   // 已經在磁吸範圍邊上，下一幀就會飛過來
       let cluster = 0;
-      for (const o of items) if (Math.abs(o.x - k.x) < 90 && Math.abs(o.y - k.y) < 90) cluster += wOf(o);
+      for (const o of items) if (Math.abs(o.x - k.x) < clR && Math.abs(o.y - k.y) < clR) cluster += wOf(o);
       let crowd = 0;
       if (hpPct < 0.6) for (const e of enemies) if (!e.dead && Math.abs(e.x - k.x) < 70 && Math.abs(e.y - k.y) < 70) crowd += e.boss ? 5 : 1;
-      let s = cluster / (d + 40) / (1 + crowd * 0.35 * fear);
-      // 已經在往那一團走就繼續走完，不要每幀在兩團之間換來換去（前後來回跑的元凶之一）
-      if (S.orbGoal && Math.abs(k.x - S.orbGoal.x) < 90 && Math.abs(k.y - S.orbGoal.y) < 90) s *= 1.6;
-      if (s > bestS) { bestS = s; best = { x: k.x, y: k.y, w: 2, mode: '撿光球', orb: true }; }
+      // 順路的優先：在前方的加分；身後的（離磁吸範圍還遠）不回頭撿，繞圈繞回來時自然會經過。
+      // 回頭撿 → 回到圈上 → 又回頭，是來回抽搐的主因
+      const ahead = (ox * dx + oy * dy) / (d || 1);
+      if (ahead < -0.3 && d > mag + 60 && wOf(k) < 5) continue;
+      let s = cluster / (d + 120) / (1 + crowd * 0.35 * fear) * (1.25 + 0.5 * ahead);
+      if (s > bestS) { bestS = s; best = k; }
     }
-    S.orbGoal = best;
-    if (best) return best;
+    if (best) {
+      const d = Math.hypot(best.x - p.x, best.y - p.y);
+      S.orbGoal = { x: best.x, y: best.y, until: gt + 1.5 + 2 * d / pSpd };
+      return { x: best.x, y: best.y, w: 2, mode: '撿光球', orb: true };
+    }
+    S.orbGoal = null;
     // 沒東西撿：主動去找最近的怪群（停在安全距離外讓招式打），越快清怪經驗越多
     if (hpPct > 0.5) {
       let hunt = null, hd = Infinity;
@@ -640,6 +655,7 @@
     let kite = null;
     // 有目標（光球、事件…）就專心走過去，不同時繞圈；只有真的沒事做、或正在被圍攻時才遛怪。
     // 兩股力量同時拉，就會前後來回跑
+    const hadTarget = S.hadTarget; S.hadTarget = !!target && here <= 2;
     const ar = judging ? (S.jCenter && { x: S.jCenter.x, y: S.jCenter.y, r: 24, judge: true }) : arena && ns.Rift.arena;
     if (ar) {
       // 秘境（裂縫）打神獸：神獸會輪流切換「遠距 / 近身」模式，近身時直接追人（暴怒後比玩家快），
@@ -675,6 +691,7 @@
       const kl = Math.hypot(kx, ky);
       if (kl > 0.01) kite = { x: kx / kl, y: ky / kl, w };
     } else if ((!target || here > 2) && !(target && target.hold) && !(target && target.chase && here < 4)) {
+      if (hadTarget) S.loopC = null;   // 剛撿完光球 / 辦完事：以目前的前進方向重新畫圈，不要被拉回舊的圈上（會掉頭）
       let R = 380, c = S.loopC;
       const v = S.out || [1, 0];
       const anchor = () => ({ x: p.x - R * S.spin * v[1], y: p.y + R * S.spin * v[0] }); // 讓目前位置剛好在圈上、前進方向是切線
@@ -818,8 +835,8 @@
   //    例：妙蛙種子預設藤鞭，換成能量球，配置才排得下 4 招
   // 2. 「招式庫」(1500)+「第二初始招式」：回主選單時錢夠就先買，第二招設成配置裡下一個能當開局的招式（存檔 pstart2）
   // 3. 其他：每次挑「價值 ÷ 價格」最高、買得起的一項，一直買到錢不夠
-  const UPG_VALUE = { def: 1.2, atk: 1.1, cd: 1.1, coins: 1.1, reroll: 1.0, hp: 0.9, crit: 0.8, regen: 0.8, xp: 0.6, magnet: 0.5, spd: 0.4 };
-  const UPG_CAP = { coins: 5, magnet: 3, xp: 4, reroll: 3 };   // 這幾項只升到這裡就夠了
+  const UPG_VALUE = { def: 1.2, xp: 1.15, atk: 1.1, cd: 1.1, coins: 1.1, reroll: 1.0, hp: 0.9, magnet: 0.9, crit: 0.8, regen: 0.8, spd: 0.4 };
+  const UPG_CAP = { coins: 5, reroll: 3 };   // 這幾項只升到這裡就夠了
   let lastUpgrade = 0;
   function autoUpgrade(ns) {
     if (!cfg.upgrade || ns.Game.state !== 'ui' || !ns.Upgrades || !ns.DB || !ns.DB.save) return;
