@@ -2,7 +2,7 @@
 // @name         PokéSurvivor 自動掛機 (PSBot)
 // @name:en      PokéSurvivor Auto-Farm (PSBot)
 // @namespace    https://github.com/BoundlessEgret/pokesurvivor-autofarm
-// @version      1.6.5
+// @version      1.6.6
 // @description  PokéSurvivor 自動走位躲招、選卡、綁羈絆、進神祕裂縫、處理事件（Gholdengo、求救、祭壇…）、自動再開一局
 // @description:en Auto movement & dodging, card picks, bonds, rifts, events (Gholdengo, rescues, altars…) and auto restart for PokéSurvivor
 // @author       BoundlessEgret
@@ -27,7 +27,7 @@
   'use strict';
   const HOOK_KEY = 'Game';
   const STORE_KEY = 'psbot.v1';
-  const VERSION = '1.6.5';   // 改程式時記得跟 manifest.json 一起改，面板標題會顯示，用來確認瀏覽器跑的是不是新版
+  const VERSION = '1.6.6';   // 改程式時記得跟 manifest.json 一起改，面板標題會顯示，用來確認瀏覽器跑的是不是新版
   const log = (...a) => console.log('%c[PSBot]', 'color:#ff8ad8', ...a);
 
   // ---------- 1. 抓命名空間 ----------
@@ -184,8 +184,8 @@
     const prof = profileOf(ns);
     if (prof) {
       const i = prof.moves.indexOf(id);
-      // 畢業配置剛好塞滿 4 格，配置外的招式一律不拿，免得佔掉欄位
-      return i >= 0 ? 900 - i * 5 : (p.slots.length + (prof.moves.length - countOwned(p, prof.moves)) < p.maxMoves ? 200 : -100);
+      // 配置外的招式一律不拿：綁完羈絆空出欄位也不拿。多學的招會在下次拿到羈絆時被遊戲強制綁成沒用的第二組
+      return i >= 0 ? 900 - i * 5 : -100;
     }
     // 自動模式（沒有設定配置的寶可夢），照一般玩家的配法：
     // 開局招式 → 變硬 → 劍舞（物攻）/ 詭計（特攻）→ 第二招攻擊（範圍越大越好，用來清怪）。
@@ -200,7 +200,7 @@
     const need = ['harden', buffId].filter(x => !p.hasMove(x)).length;
     if (atk === 0) return 860;
     if (p.maxMoves - p.slots.length - need < 1) return -100;
-    if (atk >= 2) return 200;   // 4 招都齊了、綁羈絆後空出欄位：沒更好的卡才拿
+    if (atk >= 2) return -100;  // 4 招都齊了就不再學：綁羈絆後空出欄位也不拿（多學的招會被遊戲強制綁成沒用的第二組）
     return atk === 0 ? 860 : 800 + aoeScore(ns, p, m);
   }
 
@@ -460,7 +460,9 @@
       out.push({ key: 'thief' + e.id, x: e.x, y: e.y, tier: gold ? 5 : 3, value: gold ? 14 : 3, left: 15 - (now - S.seen[e.id]), mode: gold ? '追 Gholdengo' : '追喵喵', goalTol: 2, chase: true, flee: e.spd || 92 });
     }
     const rift = ns.Rift && ns.Rift.rift;
-    if (cfg.rift && rift && !ns.Rift.inArena && hpPct > 0.2)
+    // 裂縫只給羈絆。第一組已經綁滿 4 招就不用再進（再拿到羈絆只會被強制綁第二組），省時間也少冒險
+    const bondDone = p.slots.some(g => g.length >= 4);
+    if (cfg.rift && rift && !ns.Rift.inArena && hpPct > 0.2 && !bondDone)
       out.push({ key: 'rift', tier: 4, x: rift.x, y: rift.y - 10, value: 12, left: rift.ttl ?? 45, mode: '進裂縫', goalTol: 0, chase: true, direct: true });
     const lost = ns.Events && ns.Events._dbg && ns.Events._dbg();
     if (lost && hpPct > 0.25 && !ns.Rift.inArena) {
