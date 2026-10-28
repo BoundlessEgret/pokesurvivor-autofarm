@@ -9,7 +9,7 @@
   'use strict';
   const HOOK_KEY = 'Game';
   const STORE_KEY = 'psbot.v1';
-  const VERSION = '1.6.4';   // 改程式時記得跟 manifest.json 一起改，面板標題會顯示，用來確認瀏覽器跑的是不是新版
+  const VERSION = '1.6.5';   // 改程式時記得跟 manifest.json 一起改，面板標題會顯示，用來確認瀏覽器跑的是不是新版
   const log = (...a) => console.log('%c[PSBot]', 'color:#ff8ad8', ...a);
 
   // ---------- 1. 抓命名空間 ----------
@@ -338,6 +338,20 @@
   // ---------- 8a. 尋路（A*，用遊戲自己的地形格子） ----------
   // 局部取樣只看得到身邊 200px，目標在牆 / 狹縫另一邊時會在牆前打轉；
   // 所以重要目標一律先用 A* 算出真正走得到的路線，再沿著路線上的點走
+  // 液體（遊戲的 isFree 預設把液體當牆，要傳第 4 個參數才算可走，所以舊版以為河對面的光球吃不到）：
+  // - 水 / 沼澤：只會變慢（×0.6 / ×0.45），走得過去；岩漿 / 毒池 / 電池：會扣血；冰：會滑
+  // - 屬性免疫：水系不怕水和沼澤、火系不怕岩漿、毒 / 鋼不怕毒池、電 / 地面不怕電池、冰系不怕冰（遊戲的 liquidEffect 已經算進去）
+  // - 特性：漂浮 = 完全不算進入液體；柔軟 / 我行我素 / 遲鈍 / 精神力這類「不受地形影響」= 不會變慢；魔法防守 / 水幕 = 不怕岩漿和毒
+  const liquidOf = (ns, p) => {
+    const W = ns.World, ab = p.abil || {};
+    if (!W || !W.liquidEffect || ab.levitate) return {};
+    const e = Object.assign({}, W.liquidEffect((p.mon && p.mon.types) || []) || {});
+    if (ab.lavaProof) delete e.dmg;
+    if (ab.steady) delete e.slow;
+    return e;
+  };
+  const wetOk = (ns, p) => !liquidOf(ns, p).dmg;               // 不會扣血的液體就當成可以走
+  const wetSlow = (ns, p) => liquidOf(ns, p).slow || 1;         // 走在液體裡的速度倍率（1 = 不受影響）
   const trapsNear = (W, x, y, r) => ((W && W.specialsNear && W.specialsNear(x, y, r)) || []).filter(t => t.type === 'trap');
   function findPath(ns, p, tx, ty, goalTol) {
     const W = ns.World, TS = W.TS || 32;
@@ -346,6 +360,7 @@
     const span = Math.max(Math.abs(gx - sx), Math.abs(gy - sy)) + 20;
     if (span > 120) return null;                                   // 太遠了，不值得
     const traps = trapsNear(W, (p.x + tx) / 2, (p.y + ty) / 2, Math.hypot(tx - p.x, ty - p.y) / 2 + 200);
+    const wet = wetOk(ns, p), wetCost = 1 / wetSlow(ns, p);   // 走水裡比較慢：成本照速度放大，太遠就繞、近的直接涉水
     const walk = new Map();
     const K = (x, y) => (x + 50000) * 100000 + (y + 50000);
     const ok = (x, y) => {
@@ -353,7 +368,7 @@
       let v = walk.get(k);
       if (v === undefined) {
         const cx = x * TS + TS / 2, cy = y * TS + TS / 2;
-        v = Math.abs(x - sx) <= span && Math.abs(y - sy) <= span && W.isFree(cx, cy, Math.min(p.r, TS * 0.45))
+        v = Math.abs(x - sx) <= span && Math.abs(y - sy) <= span && W.isFree(cx, cy, Math.min(p.r, TS * 0.45), wet)
           && !traps.some(t => (cx - t.x) ** 2 + (cy - t.y + 8) ** 2 < 26 * 26);
         walk.set(k, v);
       }
@@ -375,7 +390,8 @@
         const nx = c.x + dx, ny = c.y + dy;
         if (!ok(nx, ny) && !isGoal(nx, ny)) continue;
         if (dx && dy && (!ok(c.x + dx, c.y) || !ok(c.x, c.y + dy))) continue;   // 不切牆角
-        const ng = cg + (dx && dy ? 1.414 : 1), nk = K(nx, ny);
+        const wetMul = wet && W.isLiquid && W.isLiquid(nx * TS + TS / 2, ny * TS + TS / 2) ? wetCost : 1;
+        const ng = cg + (dx && dy ? 1.414 : 1) * wetMul, nk = K(nx, ny);
         if (ng < (g.get(nk) ?? Infinity)) { g.set(nk, ng); from.set(nk, ck); push({ x: nx, y: ny, f: ng + h(nx, ny) }); }
       }
     }
@@ -398,7 +414,7 @@
       for (let i = 1; i <= n; i++) {
         if (d * (1 - i / n) < 26) break;
         const sx = p.x + (x - p.x) * i / n, sy = p.y + (y - p.y) * i / n;
-        if (!W.isFree(sx, sy, p.r) || traps.some(t => (sx - t.x) ** 2 + (sy - t.y + 8) ** 2 < 23 * 23)) return false;
+        if (!W.isFree(sx, sy, p.r, wetOk(ns, p)) || traps.some(t => (sx - t.x) ** 2 + (sy - t.y + 8) ** 2 < 23 * 23)) return false;
       }
       return true;
     };
@@ -440,7 +456,7 @@
       const spots = [];
       for (const r of [140, 220, 300]) for (let k = 0; k < 24; k++) {
         const a = k / 24 * 6.2832, x = lt.x + Math.cos(a) * r, y = lt.y + Math.sin(a) * r;
-        if (W.isFree(x, y, p.r + 4) && clearShot(x, y)) spots.push({ x, y, d: Math.hypot(x - p.x, y - p.y) });
+        if (W.isFree(x, y, p.r + 4, wetOk(ns, p)) && clearShot(x, y)) spots.push({ x, y, d: Math.hypot(x - p.x, y - p.y) });
       }
       spots.sort((a, b) => a.d - b.d);
       for (const sp of spots.slice(0, 2)) out.push({ key: 'los' + Math.round(sp.x / 64) + ',' + Math.round(sp.y / 64), tier: 1, x: sp.x, y: sp.y, value: 6, left: Infinity, mode: '找射擊角度', goalTol: 0, chase: true });
@@ -654,7 +670,8 @@
 
     // 障礙物：沿路每 12px 檢查一次能不能走；終點周圍越多牆（死角、窄縫）扣越多分，
     // 免得被小怪逼進樹叢和石頭之間卡死
-    const free = (x, y) => !W || !W.isFree || W.isFree(x, y, p.r);
+    const wet = wetOk(ns, p), slowWet = wet && wetSlow(ns, p) < 1 && W && W.isLiquid;
+    const free = (x, y) => !W || !W.isFree || W.isFree(x, y, p.r, wet);
     // 地上的陷阱（扁平、不擋路，踩到才觸發；遊戲判定點在 y-8、半徑 13）。當成「不能走的格子」處理，
     // 再多留 10px 安全距離
     const traps = ((W && W.specialsNear && W.specialsNear(p.x, p.y, 400)) || []).filter(t => t.type === 'trap');
@@ -782,7 +799,7 @@
         const x = p.x + dx * reach, y = p.y + dy * reach;
         // 優先序：躲技能（首領招式 / 彈幕 / 預警，權重最大）> 避開障礙物 > 撿光球 / 進裂縫
         let c = danger(x, y, reach / pSpd);
-        c += (reach < step ? 6 + 6 * (1 - reach / step) : 0) + cramped(x, y) * 1.2;
+        c += (reach < step ? 6 + 6 * (1 - reach / step) : 0) + cramped(x, y) * 1.2 + (slowWet && W.isLiquid(x, y) ? 1.2 : 0);   // 水裡會變慢，能走陸地就走陸地
         if (target) {
           const before = Math.hypot(target.x - p.x, target.y - p.y), after = Math.hypot(target.x - x, target.y - y);
           c -= target.w * (before - after) / step;   // 被牆擋住只走得到一半，收益也只算一半
@@ -807,7 +824,7 @@
       let bd = null, bs = -Infinity;
       for (const [dx, dy] of DIRS) {
         let r = pathLen(dx, dy, 120);
-        if (r < 12) for (let t2 = 6; t2 <= 40; t2 += 6) { if (W && W.isFree && !W.isFree(p.x + dx * t2, p.y + dy * t2, p.r * 0.5)) break; r = t2 * 0.5; }
+        if (r < 12) for (let t2 = 6; t2 <= 40; t2 += 6) { if (W && W.isFree && !W.isFree(p.x + dx * t2, p.y + dy * t2, p.r * 0.5, wet)) break; r = t2 * 0.5; }
         const sc = r - cramped(p.x + dx * r, p.y + dy * r) * 15 - danger(p.x + dx * r, p.y + dy * r, 0.5) * 20;
         if (sc > bs) { bs = sc; bd = [dx, dy]; }
       }
