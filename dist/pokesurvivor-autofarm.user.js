@@ -2,7 +2,7 @@
 // @name         PokéSurvivor 自動掛機 (PSBot)
 // @name:en      PokéSurvivor Auto-Farm (PSBot)
 // @namespace    https://github.com/BoundlessEgret/pokesurvivor-autofarm
-// @version      1.6.2
+// @version      1.6.3
 // @description  PokéSurvivor 自動走位躲招、選卡、綁羈絆、進神祕裂縫、處理事件（Gholdengo、求救、祭壇…）、自動再開一局
 // @description:en Auto movement & dodging, card picks, bonds, rifts, events (Gholdengo, rescues, altars…) and auto restart for PokéSurvivor
 // @author       BoundlessEgret
@@ -27,7 +27,7 @@
   'use strict';
   const HOOK_KEY = 'Game';
   const STORE_KEY = 'psbot.v1';
-  const VERSION = '1.6.2';   // 改程式時記得跟 manifest.json 一起改，面板標題會顯示，用來確認瀏覽器跑的是不是新版
+  const VERSION = '1.6.3';   // 改程式時記得跟 manifest.json 一起改，面板標題會顯示，用來確認瀏覽器跑的是不是新版
   const log = (...a) => console.log('%c[PSBot]', 'color:#ff8ad8', ...a);
 
   // ---------- 1. 抓命名空間 ----------
@@ -451,9 +451,9 @@
       if (lost.state === 'wait') out.push({ key: 'lost', tier: 3, x: lost.x, y: lost.y, value: 8, left: 90, mode: '去救援', goalTol: 1, chase: true });
       else out.push({ key: 'escort', tier: 3, x: lost.tx, y: lost.ty, value: 9, left: 90, mode: '護送中', goalTol: 0, chase: true, hold: 20, escort: true });
     }
-    // 對著牆打超過 0.8 秒：在被鎖定的那隻怪周圍找「看得到牠、又站得住」的點，用 A* 繞過去
+    // 對著牆打超過 0.4 秒：在被鎖定的那隻怪周圍找「看得到牠、又站得住」的點，用 A* 繞過去
     const lt = S.losTarget;
-    if (lt && !lt.dead && !lt.arceus && !(ns.Judgment && ns.Judgment.active) && S.losBadT > 0.8 && W && W.isFree && W.projectileBlock) {
+    if (lt && !lt.dead && !lt.arceus && !(ns.Judgment && ns.Judgment.active) && S.losBadT > 0.4 && W && W.isFree && W.projectileBlock) {
       const clearShot = (x, y) => { const d = Math.hypot(lt.x - x, lt.y - y), n = Math.ceil(d / 12); for (let i = 1; i < n; i++) if (W.projectileBlock(x + (lt.x - x) * i / n, y + (lt.y - y) * i / n - (ns.LIFT || 0), 4)) return false; return true; };
       const spots = [];
       for (const r of [140, 220, 300]) for (let k = 0; k < 24; k++) {
@@ -529,43 +529,49 @@
     const pSpd = (p.baseSpd || 100) * (p.spdMul || 1);
     const traps = ((W && W.specialsNear && W.specialsNear(p.x, p.y, 600)) || []).filter(t => t.type === 'trap');
     const onTrap = k => traps.some(t => (k.x - t.x) ** 2 + (k.y - t.y + 8) ** 2 < 23 * 23);
-    // 掉在陷阱上的球不撿（走進磁吸範圍就會自己飛過來，不用踩上去）
-    // 前期（前 5 分鐘）不管怪多少都追光球；之後身後拖著一長串怪時只撿附近的，遠的下一圈經過自然會吸到
-    const crowded = gt > 300 && enemies.length >= 6;
+    // 掉在陷阱上的球不撿（走進磁吸範圍就會自己飛過來，不用踩上去）。
+    // 撿光球永遠比遛怪優先，畫面外的也去撿（光球不會消失，放著就是白白浪費經驗）；
+    // 路上的怪和招式交給走位的扣血成本去閃
+    S.orbBan = (S.orbBan || []).filter(b => b.until > gt);
+    const banned = k => S.orbBan.some(b => Math.abs(k.x - b.x) < 70 && Math.abs(k.y - b.y) < 70);
     const all = ns.Pickups.all();
     // 「磁鐵」道具會把全地圖的光球一次吸過來：地上光球越多越值得去撿
     let loose = 0;
     for (const k of all) if (!k.pulled && (k.kind === 'xp' || k.kind === 'xpBig')) loose += k.kind === 'xpBig' ? 3 : 1;
     const wOf = k => k.kind === 'heal' ? (hpPct < 0.7 ? 8 : 0.2) : k.kind === 'magnet' ? 5 + loose * 0.4 : (PICK_W[k.kind] ?? 1);
-    const items = all.filter(k => !k.pulled && !(k.kind === 'heal' && hpPct >= 0.95) && !onTrap(k)
-      && (!crowded || k.kind === 'heal' || k.kind === 'magnet' || k.kind.startsWith('ticket') || k.kind === 'item' || Math.hypot(k.x - p.x, k.y - p.y) < 220 + mag));
+    const items = all.filter(k => !k.pulled && !(k.kind === 'heal' && hpPct >= 0.95) && !onTrap(k) && !banned(k));
     const clR = Math.max(90, mag * 0.8);   // 一團的範圍：站在中心時磁吸大概蓋得住
     const g = S.orbGoal;
     if (g && gt < g.until) {
       const d = Math.hypot(g.x - p.x, g.y - p.y);
+      // 走了 3 秒還沒靠近 40px（被牆 / 岩壁擋住）：這一團 20 秒內不撿，換下一團
+      // 在閃招 / 突圍時本來就走不過去，不算「被擋住」
+      if (d < g.bestD - 40 || S.mode !== '撿光球') { g.bestD = Math.min(g.bestD, d); g.at = gt; }
+      else if (gt - g.at > 3) { S.orbBan.push({ x: g.x, y: g.y, until: gt + 20 }); S.orbGoal = null; return pickTarget(ns, p, enemies, hpPct, fear); }
       let left = 0;
       for (const k of items) if (Math.abs(k.x - g.x) < clR && Math.abs(k.y - g.y) < clR) left += wOf(k);
-      if (left > 0 && d > Math.max(16, mag * 0.45)) return { x: g.x, y: g.y, w: 2, mode: '撿光球', orb: true };
+      // 那一團的中心進到磁吸範圍就夠了，剩下的會自己飛過來，不用再走過去
+      if (left > 0 && d > mag * 0.85) return { x: g.x, y: g.y, w: 2, mode: '撿光球', orb: true };
     }
     let best = null, bestS = 0;
     const [ox, oy] = S.out || [0, 0];
-    for (const k of items) {
+    // 地上可能有好幾百顆：只拿最近的 120 顆當候選（每團的價值還是用全部的球算）
+    const seeds = items.length > 120 ? items.map(k => [Math.hypot(k.x - p.x, k.y - p.y), k]).sort((a, b) => a[0] - b[0]).slice(0, 120).map(x => x[1]) : items;
+    for (const k of seeds) {
       const dx = k.x - p.x, dy = k.y - p.y, d = Math.hypot(dx, dy);
-      if (d < mag * 0.9 && k.kind !== 'heal') continue;   // 已經在磁吸範圍邊上，下一幀就會飛過來
+      if (d < mag * 0.9) continue;   // 已經在磁吸範圍內 / 邊上：會自己飛過來，不用刻意去撿
       let cluster = 0;
       for (const o of items) if (Math.abs(o.x - k.x) < clR && Math.abs(o.y - k.y) < clR) cluster += wOf(o);
       let crowd = 0;
-      if (hpPct < 0.6) for (const e of enemies) if (!e.dead && Math.abs(e.x - k.x) < 70 && Math.abs(e.y - k.y) < 70) crowd += e.boss ? 5 : 1;
-      // 順路的優先：在前方的加分；身後的（離磁吸範圍還遠）不回頭撿，繞圈繞回來時自然會經過。
-      // 回頭撿 → 回到圈上 → 又回頭，是來回抽搐的主因
+      for (const e of enemies) if (!e.dead && Math.abs(e.x - k.x) < 70 && Math.abs(e.y - k.y) < 70) crowd += e.boss ? 5 : 1;
+      // 順路的稍微加分（同樣價值時先撿前面的，少折返），身後的照樣會去撿
       const ahead = (ox * dx + oy * dy) / (d || 1);
-      if (ahead < -0.3 && d > mag + 60 && wOf(k) < 5) continue;
-      let s = cluster / (d + 120) / (1 + crowd * 0.35 * fear) * (1.25 + 0.5 * ahead);
+      const s = cluster / (d + 120) / (1 + crowd * 0.35 * fear) * (1 + 0.3 * ahead);
       if (s > bestS) { bestS = s; best = k; }
     }
     if (best) {
       const d = Math.hypot(best.x - p.x, best.y - p.y);
-      S.orbGoal = { x: best.x, y: best.y, until: gt + 1.5 + 2 * d / pSpd };
+      S.orbGoal = { x: best.x, y: best.y, until: gt + 1.5 + 2 * d / pSpd, bestD: d, at: gt };
       return { x: best.x, y: best.y, w: 2, mode: '撿光球', orb: true };
     }
     S.orbGoal = null;
@@ -701,10 +707,13 @@
       return boss || nearest;
     };
     const blockedShot = (x, y) => { const e = lockedFrom(x, y); return e && !los(x, y, e.x, e.y) ? 1 : 0; };
+    // 範圍招（放射狀、連鎖…）不只打鎖定的那隻：也看最近 6 隻裡有幾隻被岩壁 / 樹擋住
+    const shootable = aimTargets.filter(e => !e.arceus && Math.hypot(e.x - p.x, e.y - p.y) < 520).slice(0, 6);
+    const blockedFrac = (x, y) => { if (!shootable.length) return 0; let b = 0; for (const e of shootable) if (!los(x, y, e.x, e.y)) b++; return b / shootable.length; };
     S.losTarget = lockedFrom(p.x, p.y);
-    S.losBadT = blockedShot(p.x, p.y) ? (S.losBadT || 0) + dt : 0;
+    S.losBadT = blockedShot(p.x, p.y) || blockedFrac(p.x, p.y) >= 0.5 ? (S.losBadT || 0) + dt : 0;
     if (S.losBadT === 0 && S.plan && S.plan.key.startsWith('los')) S.plan = null;   // 已經打得到了，不用再往那個點走
-    const losW = S.losBadT > 0.6 ? 2.5 : 1.2;   // 已經對著牆打一陣子了，更積極換位置
+    const losW = S.losBadT > 0.4 ? 3 : 1.5;   // 已經對著牆打一陣子了，更積極換位置
 
     const here = danger(p.x, p.y, 0);
 
@@ -800,7 +809,7 @@
       }
       if (bestStep === Infinity) return Infinity;
       bestStep += hazardHits(dx, dy);
-      bestStep += losW * blockedShot(p.x + dx * 90, p.y + dy * 90);
+      bestStep += losW * (blockedShot(p.x + dx * 90, p.y + dy * 90) + blockedFrac(p.x + dx * 90, p.y + dy * 90));
       if (kite) bestStep -= kite.w * (dx * kite.x + dy * kite.y);
       else if (!target && !arena) bestStep -= 0.3 * (dx * Math.cos(S.wanderA) + dy * Math.sin(S.wanderA)); // 閒著：沿大圈慢慢繞
       return bestStep;
