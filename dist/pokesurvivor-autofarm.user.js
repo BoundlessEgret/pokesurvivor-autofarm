@@ -2,7 +2,7 @@
 // @name         PokéSurvivor 自動掛機 (PSBot)
 // @name:en      PokéSurvivor Auto-Farm (PSBot)
 // @namespace    https://github.com/BoundlessEgret/pokesurvivor-autofarm
-// @version      1.6.1
+// @version      1.6.2
 // @description  PokéSurvivor 自動走位躲招、選卡、綁羈絆、進神祕裂縫、處理事件（Gholdengo、求救、祭壇…）、自動再開一局
 // @description:en Auto movement & dodging, card picks, bonds, rifts, events (Gholdengo, rescues, altars…) and auto restart for PokéSurvivor
 // @author       BoundlessEgret
@@ -27,7 +27,7 @@
   'use strict';
   const HOOK_KEY = 'Game';
   const STORE_KEY = 'psbot.v1';
-  const VERSION = '1.6.1';   // 改程式時記得跟 manifest.json 一起改，面板標題會顯示，用來確認瀏覽器跑的是不是新版
+  const VERSION = '1.6.2';   // 改程式時記得跟 manifest.json 一起改，面板標題會顯示，用來確認瀏覽器跑的是不是新版
   const log = (...a) => console.log('%c[PSBot]', 'color:#ff8ad8', ...a);
 
   // ---------- 1. 抓命名空間 ----------
@@ -64,8 +64,6 @@
     // 每隻寶可夢的畢業配置：招式依序學習、依序建立羈絆；item = 想要的攜帶道具
     profiles: {
       150: { moves: ['confusion', 'harden', 'nasty-plot', 'psychic'], item: 'shellbell' }, // 超夢
-      1: { moves: ['energy-ball', 'nasty-plot', 'leaf-storm', 'giga-drain'], item: 'shellbell' },  // 妙蛙種子（要先買「初始招式」把藤鞭換成能量球）
-      382: { moves: ['bubble', 'nasty-plot', 'aqua-ring', 'hydro-pump'], item: 'shellbell' },       // 蓋歐卡（開局從水槍換成泡沫；水流環 = 常駐回血）
     },
     panelX: null, panelY: null, collapsed: false,
   };
@@ -73,6 +71,9 @@
   try { cfg = Object.assign({}, DEFAULTS, JSON.parse(localStorage.getItem(STORE_KEY) || '{}')); }
   catch { cfg = Object.assign({}, DEFAULTS); }
   cfg.profiles = Object.assign({}, DEFAULTS.profiles, cfg.profiles);
+  // 舊版內建的妙蛙種子 / 蓋歐卡配置不符合「開局招式 → 變硬 → 劍舞 / 詭計 → 範圍攻擊」，存檔裡還是原樣的就刪掉，改走自動模式
+  for (const [dex, old] of Object.entries({ 1: 'energy-ball,nasty-plot,leaf-storm,giga-drain', 382: 'bubble,nasty-plot,aqua-ring,hydro-pump' }))
+    if (cfg.profiles[dex] && (cfg.profiles[dex].moves || []).join() === old) delete cfg.profiles[dex];
   const save = () => { try { localStorage.setItem(STORE_KEY, JSON.stringify(cfg)); } catch {} };
 
   const stats = { runs: 0, kills: 0, coins: 0, best: 0, startedAt: Date.now() };
@@ -186,21 +187,33 @@
       // 畢業配置剛好塞滿 4 格，配置外的招式一律不拿，免得佔掉欄位
       return i >= 0 ? 900 - i * 5 : (p.slots.length + (prof.moves.length - countOwned(p, prof.moves)) < p.maxMoves ? 200 : -100);
     }
-    // 自動模式（沒有設定配置的寶可夢）：1 招主力輸出 → 對應的增益 → 防禦增益 → 第 2 招輸出
+    // 自動模式（沒有設定配置的寶可夢），照一般玩家的配法：
+    // 開局招式 → 變硬 → 劍舞（物攻）/ 詭計（特攻）→ 第二招攻擊（範圍越大越好，用來清怪）。
+    // 變硬、劍舞、詭計是一般系招式，每隻都學得到；其他增益不拿，第二招攻擊要留位置給還沒拿到的變硬 / 強化
     const m = ns.Moves.BY_ID[id];
     if (!m) return 0;
-    const side = ns.Stats.sideOf(p.mon);
-    const dmgCount = p.moves.filter(x => x.kind !== 'buff').length;
-    if (m.kind === 'buff') {
-      if ((m.stat === 'satk' && side === 'special') || (m.stat === 'patk' && side === 'physical')) return 850;
-      if (m.stat === 'def') return 845;
-      if (m.stat === 'regen') return 838;
-      if (m.stat === 'spd') return 300;
-      return 150;
-    }
+    const buffId = atkBuffOf(ns, p);
+    if (id === 'harden') return 870;
+    if (id === buffId) return 865;
+    if (m.kind === 'buff') return -100;
+    const atk = p.moves.filter(x => x.kind !== 'buff').length;
+    const need = ['harden', buffId].filter(x => !p.hasMove(x)).length;
+    if (atk === 0) return 860;
+    if (p.maxMoves - p.slots.length - need < 1) return -100;
+    if (atk >= 2) return 200;   // 4 招都齊了、綁羈絆後空出欄位：沒更好的卡才拿
+    return atk === 0 ? 860 : 800 + aoeScore(ns, p, m);
+  }
+
+  // 主力增益：物攻用劍舞、特攻用詭計
+  function atkBuffOf(ns, p) { return ns.Stats.sideOf(p.mon) === 'physical' ? 'swords-dance' : 'nasty-plot'; }
+  // 第二招攻擊挑範圍大的：放射狀 / 光環 / 落石 / 漩渦 / 繞身 / 旋轉 > 彈跳 / 連鎖 / 推開 > 扇形 / 光束 > 單體。
+  // 同屬性加分；太爛的（近戰、衝刺、拖尾）給 450，低於重抽門檻，有重抽次數時會先重抽等更好的
+  const AOE_PRI = { nova: 40, aura: 38, meteor: 36, vortex: 35, orbit: 34, spin: 33, bounce: 31, chain: 30, shove: 29, quake: 27, cone: 26, charge: 24, stun: 22, beam: 22, boomerang: 20, homing: 18, projectile: 12, turret: 12, mine: 8 };
+  function aoeScore(ns, p, m) {
+    if (!(m.kind in AOE_PRI)) return -350;
     const fit = m.cat ? ns.Stats.fit(p.mon, m.cat) : 1;
-    const base = dmgCount === 0 ? 860 : dmgCount === 1 ? 815 : 780;
-    return base + (fit >= 0.999 ? 10 : -40) + (KIND_PRI[m.kind] || 5);
+    if (fit < 0.9) return -350;   // 物攻 / 特攻對不上（例：特攻型拿到物理招）打不痛，寧可重抽等下一張
+    return AOE_PRI[m.kind] + (fit >= 0.999 ? 0 : -15) + ((p.mon.types || []).includes(m.type) ? 8 : 0);
   }
 
   function countOwned(p, ids) { return ids.filter(id => p.hasMove(id)).length; }
@@ -254,8 +267,12 @@
   function bondRank(ns, p, mv) {
     const prof = profileOf(ns);
     if (prof) { const i = prof.moves.indexOf(mv.id); return i >= 0 ? i : 50; }
-    // 自動：輸出招式優先，再來是增益
-    return mv.kind === 'buff' ? 10 : 0;
+    // 自動：開局招式（第一個學到的攻擊招）→ 變硬 → 劍舞 / 詭計 → 其他攻擊招
+    const first = p.moves.find(x => x.kind !== 'buff');
+    if (first && mv.id === first.id) return 0;
+    if (mv.id === 'harden') return 1;
+    if (mv.id === atkBuffOf(ns, p)) return 2;
+    return mv.kind === 'buff' ? 10 : 3;
   }
   function chooseBond(ns, opt) {
     const p = ns.Game.player;
@@ -611,8 +628,18 @@
     const pSpd = (p.baseSpd || 100) * (p.spdMul || 1);
     // 小怪的危險度乘 fear（血多就不太躲）；首領本體、彈幕、地面預警不管血量都要躲
     const bigFear = Math.max(1, fear);
+    // 實際會扣多少血（佔最大 HP 的比例）。遊戲規則：
+    // - 被碰到 / 被子彈打到後有 0.45 秒無敵，同時被 10 隻碰也只扣一次 → 只算「最痛的那一下」，不是怪越多越痛
+    // - 地面預警（落石、首領招式）打下來會先清掉無敵，一定扣、而且會疊加 → 一個一個加起來
+    // 後期招式密到一定躲不掉時，靠這個挑「扣最少血」的位置；躲得掉的話成本是 0，自然選完全躲開的位置
+    const red = 1 - Math.min(0.8, p.reduction ?? p.dmgReduce ?? 0);
+    const hitFrac = (dmg, pure) => Math.min(1, (dmg || 0) * (pure ? 1 : red) / p.maxHp);
+    const hazFrac = h => Math.min(1, (h.pct ? Math.max(h.dmg || 0, p.maxHp * h.pct) : (h.dmg || 0)) * (h.pure ? 1 : red) / p.maxHp);
+    // 扣 10% 血 ≈ 成本 9~16，血越少越在意。被小怪碰一下（有無敵時間、不會疊加）在血量健康時不太在意，
+    // 不然撿光球時每隻迎面走來的怪都會讓人轉頭閃一下又轉回來（抽搐）
+    const DMG_W = hpPct < 0.6 ? 160 : 90, TOUCH_W = hpPct < 0.35 ? 160 : hpPct < 0.6 ? 100 : 30;
     const danger = (x, y, tAhead) => {
-      let c = 0, big = 0;
+      let c = 0, big = 0, worst = 0, haz = 0;
       for (const e of near) {
         // 敵人也會往我們走：預測它追上來的距離。跑得快（像 runner 會預判衝刺）的範圍放大，
         // 撞一下很痛的權重加重
@@ -623,14 +650,18 @@
         const w = e.arceus ? 8 : (e.boss ? 4 : 1) * Math.min(3, Math.max(0.5, (e.dmg || 10) / (p.maxHp * 0.12)));
         const v = w * Math.exp(-Math.max(d, -20) / reach);
         if (e.boss || e.arceus) big += v; else c += v;
+        // 碰到的機率：已經貼著 = 1，越遠越低
+        const touch = Math.exp(-Math.max(0, d) / 18);
+        worst = Math.max(worst, touch * (e.arceus ? 0.4 : hitFrac(e.dmg, false)));
       }
       for (const s of shots) {
         const sx = s.x + (s.vx || 0) * tAhead, sy = s.y + (s.vy || 0) * tAhead;
         const d = Math.hypot(x - sx, y - sy) - (s.r || 6) - p.r;
         big += 6 * Math.exp(-Math.max(d, -10) / 30);
+        worst = Math.max(worst, Math.exp(-Math.max(0, d) / 20) * Math.max(0.03, hitFrac(s.dmg, false)));
       }
-      for (const h of hazards) if (!h.hit && inHazard(h, x, y, p.r)) big += 25;
-      return c * fear + big * bigFear;
+      for (const h of hazards) if (!h.hit && inHazard(h, x, y, p.r)) { big += 25; haz += hazFrac(h); }
+      return c * fear + big * bigFear + worst * TOUCH_W + haz * DMG_W;
     };
 
     // 障礙物：沿路每 12px 檢查一次能不能走；終點周圍越多牆（死角、窄縫）扣越多分，
@@ -740,14 +771,15 @@
     const hazardHits = (dx, dy) => {
       if (!hazards.length) return 0;
       const reach = pathLen(dx, dy, 240);
-      let hit = 0;
+      let hit = 0, frac = 0;
       for (const h of hazards) {
         if (h.hit) continue;
         const tr = Math.max(0, (h.delay || 0) - (h.t || 0));
         const t2 = Math.min(tr * pSpd * 0.9, reach);   // 0.9：轉向和加速的損耗
-        if (inHazard(h, p.x + dx * t2, p.y + dy * t2, p.r + 4)) hit += 1;
+        if (inHazard(h, p.x + dx * t2, p.y + dy * t2, p.r + 4)) { hit += 1; frac += hazFrac(h); }
       }
-      return hit * 30 * bigFear;
+      // 每個躲不掉的預警都扣分（能完全躲開就躲開）；都躲不掉時，挑加起來扣血最少的方向
+      return hit * 30 * bigFear + frac * DMG_W * 1.5;
     };
 
     // 每個方向的成本 = 三種步長裡最好的那個
@@ -846,10 +878,11 @@
           for (const [dx, dy] of DIRS) {
             const reach = pathLen(dx, dy, 160);
             if (reach < 40) continue;
-            let c = (160 - reach) / 20;                  // 前面很快就撞牆的方向不好
+            let c = (160 - reach) / 20 + hazardHits(dx, dy);   // 前面很快就撞牆、或會衝進預警的方向不好
             for (const e of near) {
               const ex = e.x - p.x, ey = e.y - p.y, d = Math.hypot(ex, ey) || 1, cos = (ex * dx + ey * dy) / d;
-              if (cos > 0) c += (e.boss ? 4 : 1) * cos * cos * 100 / Math.max(30, d);
+              // 往越痛的怪那邊衝越不好（同樣擋路，寧可撞弱的）
+              if (cos > 0) c += (e.boss ? 4 : 1) * (0.5 + 10 * hitFrac(e.dmg, false)) * cos * cos * 100 / Math.max(30, d);
             }
             if (target) c -= 0.5 * (dx * (target.x - p.x) + dy * (target.y - p.y)) / (Math.hypot(target.x - p.x, target.y - p.y) || 1);
             if (c < bs) { bs = c; bd = [dx, dy]; }
@@ -933,7 +966,8 @@
       if (!upg.start) buy('start');
       if (upg.start && (sv.pstart || {})[dex] !== want1) { sv.pstart = sv.pstart || {}; sv.pstart[dex] = want1; bought.push('開局招式→' + want1); }
     }
-    const want2 = prof ? prof.moves.find(id => choices.includes(id) && id !== want1) : autoPick(want1);
+    // 第二開局招式照學招順序：自動模式是變硬（可以當開局招式的話），不行才挑第二招攻擊
+    const want2 = prof ? prof.moves.find(id => choices.includes(id) && id !== want1) : choices.includes('harden') ? 'harden' : autoPick(want1);
     if (want2) {
       if (!upg.moves) buy('moves');
       if (upg.moves && !upg.start2) buy('start2');
