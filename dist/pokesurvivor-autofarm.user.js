@@ -2,7 +2,7 @@
 // @name         PokéSurvivor 自動掛機 (PSBot)
 // @name:en      PokéSurvivor Auto-Farm (PSBot)
 // @namespace    https://github.com/BoundlessEgret/pokesurvivor-autofarm
-// @version      1.6.0
+// @version      1.6.1
 // @description  PokéSurvivor 自動走位躲招、選卡、綁羈絆、進神祕裂縫、處理事件（Gholdengo、求救、祭壇…）、自動再開一局
 // @description:en Auto movement & dodging, card picks, bonds, rifts, events (Gholdengo, rescues, altars…) and auto restart for PokéSurvivor
 // @author       BoundlessEgret
@@ -27,7 +27,7 @@
   'use strict';
   const HOOK_KEY = 'Game';
   const STORE_KEY = 'psbot.v1';
-  const VERSION = '1.6.0';   // 改程式時記得跟 manifest.json 一起改，面板標題會顯示，用來確認瀏覽器跑的是不是新版
+  const VERSION = '1.6.1';   // 改程式時記得跟 manifest.json 一起改，面板標題會顯示，用來確認瀏覽器跑的是不是新版
   const log = (...a) => console.log('%c[PSBot]', 'color:#ff8ad8', ...a);
 
   // ---------- 1. 抓命名空間 ----------
@@ -450,7 +450,17 @@
       // 祭壇（25 秒 buff：傷害×2 / 速度 / 磁吸×4 / 冷卻-40%）、泉水（回血）、大寶箱（站 3.5 秒開箱）
       if (o.type === 'altar' && !o.used) out.push({ key: 'altar' + o.id, tier: 2, x: o.x, y: o.y, value: 5, left: Infinity, mode: '吃 buff', goalTol: 1, chase: true });
       else if (o.type === 'spring' && hpPct < 0.6 && (o.charge ?? 1) > 0.2) out.push({ key: 'spring' + o.id, tier: 2, x: o.x, y: o.y - 8, value: 7, left: Infinity, mode: '泉水回血', goalTol: 0, hold: 20, until: () => p.hp >= p.maxHp * 0.95 });
-      else if (o.type === 'bigchest' && hpPct > 0.5) out.push({ key: 'chest' + o.id, tier: 2, x: o.x, y: o.y, value: 3, left: Infinity, mode: '開寶箱', goalTol: 1, hold: 34 });
+      else if (o.type === 'bigchest' && hpPct > 0.5) {
+        // 遊戲的判定：站在離寶箱中心 46px 內滿 3.5 秒。寶箱本身是實心的，旁邊又常有樹，
+        // 舊版走向寶箱中心、要求 34px 內才停，被樹擋住就一直蹭樹開不到。
+        // 改成先在寶箱周圍 22~34px 找一個站得下的空位，走到那個點站著（離空位 10px 內 = 離寶箱 44px 內）
+        let spot = null, sd = Infinity;
+        for (const r of [22, 28, 34]) for (let k = 0; k < 16; k++) {
+          const a = k / 16 * 6.2832, x = o.x + Math.cos(a) * r, y = o.y + Math.sin(a) * r;
+          if (!W.isFree || W.isFree(x, y, p.r + 2)) { const d = Math.hypot(x - p.x, y - p.y); if (d < sd) { sd = d; spot = { x, y }; } }
+        }
+        if (spot) out.push({ key: 'chest' + o.id, tier: 2, x: spot.x, y: spot.y, value: 3, left: Infinity, mode: '開寶箱', goalTol: 0, hold: 10 });
+      }
     }
     return out;
   }
@@ -529,9 +539,11 @@
       for (const o of items) if (Math.abs(o.x - k.x) < clR && Math.abs(o.y - k.y) < clR) cluster += wOf(o);
       let crowd = 0;
       if (hpPct < 0.6) for (const e of enemies) if (!e.dead && Math.abs(e.x - k.x) < 70 && Math.abs(e.y - k.y) < 70) crowd += e.boss ? 5 : 1;
-      let s = cluster / (d + 120) / (1 + crowd * 0.35 * fear);
-      // 順路的優先：在前方的加分、要回頭的扣分，不會為了身後一小團折返
-      s *= 1.25 + 0.5 * (ox * dx + oy * dy) / (d || 1);
+      // 順路的優先：在前方的加分；身後的（離磁吸範圍還遠）不回頭撿，繞圈繞回來時自然會經過。
+      // 回頭撿 → 回到圈上 → 又回頭，是來回抽搐的主因
+      const ahead = (ox * dx + oy * dy) / (d || 1);
+      if (ahead < -0.3 && d > mag + 60 && wOf(k) < 5) continue;
+      let s = cluster / (d + 120) / (1 + crowd * 0.35 * fear) * (1.25 + 0.5 * ahead);
       if (s > bestS) { bestS = s; best = k; }
     }
     if (best) {
@@ -671,6 +683,7 @@
     let kite = null;
     // 有目標（光球、事件…）就專心走過去，不同時繞圈；只有真的沒事做、或正在被圍攻時才遛怪。
     // 兩股力量同時拉，就會前後來回跑
+    const hadTarget = S.hadTarget; S.hadTarget = !!target && here <= 2;
     const ar = judging ? (S.jCenter && { x: S.jCenter.x, y: S.jCenter.y, r: 24, judge: true }) : arena && ns.Rift.arena;
     if (ar) {
       // 秘境（裂縫）打神獸：神獸會輪流切換「遠距 / 近身」模式，近身時直接追人（暴怒後比玩家快），
@@ -706,6 +719,7 @@
       const kl = Math.hypot(kx, ky);
       if (kl > 0.01) kite = { x: kx / kl, y: ky / kl, w };
     } else if ((!target || here > 2) && !(target && target.hold) && !(target && target.chase && here < 4)) {
+      if (hadTarget) S.loopC = null;   // 剛撿完光球 / 辦完事：以目前的前進方向重新畫圈，不要被拉回舊的圈上（會掉頭）
       let R = 380, c = S.loopC;
       const v = S.out || [1, 0];
       const anchor = () => ({ x: p.x - R * S.spin * v[1], y: p.y + R * S.spin * v[0] }); // 讓目前位置剛好在圈上、前進方向是切線
@@ -812,6 +826,37 @@
       const dx = target.x - p.x, dy = target.y - p.y, d = Math.hypot(dx, dy) || 1;
       const safe = !hazards.some(h => !h.hit && inHazard(h, p.x + dx / d * 30, p.y + dy / d * 30, p.r));
       if (safe && d > 4) best = [dx / d, dy / d];
+    }
+
+    // 被小怪包圍（身邊 70px 內 5 隻以上、8 個方位有 6 個被佔）：取樣會在幾個差不多爛的方向之間跳來跳去，
+    // 人就原地抽搐挨打。改成挑「怪最稀、又沒被牆擋」的方向直接衝出去，寧可撞一兩隻也要出圈。
+    // 方向選定後一路衝到身邊 70px 內剩不到 3 隻（最多 2.5 秒），中途不重選，不然又會在圈裡繞
+    if (!arena && !emergency) {
+      let close = 0; const sect = new Set();
+      for (const e of near) {
+        if (e.boss) continue;
+        if (Math.hypot(e.x - p.x, e.y - p.y) - (e.r || 10) - p.r > 70) continue;
+        close++; sect.add((Math.round(Math.atan2(e.y - p.y, e.x - p.x) / (Math.PI / 4)) + 8) % 8);
+      }
+      if (S.breakT > 0 && close >= 3 && pathLen(S.breakDir[0], S.breakDir[1], 40) >= 24) { S.breakT -= dt; best = S.breakDir; S.mode = '突圍'; }
+      else {
+        S.breakT = 0;
+        if (close >= 5 && sect.size >= 6) {
+          let bd = null, bs = Infinity;
+          for (const [dx, dy] of DIRS) {
+            const reach = pathLen(dx, dy, 160);
+            if (reach < 40) continue;
+            let c = (160 - reach) / 20;                  // 前面很快就撞牆的方向不好
+            for (const e of near) {
+              const ex = e.x - p.x, ey = e.y - p.y, d = Math.hypot(ex, ey) || 1, cos = (ex * dx + ey * dy) / d;
+              if (cos > 0) c += (e.boss ? 4 : 1) * cos * cos * 100 / Math.max(30, d);
+            }
+            if (target) c -= 0.5 * (dx * (target.x - p.x) + dy * (target.y - p.y)) / (Math.hypot(target.x - p.x, target.y - p.y) || 1);
+            if (c < bs) { bs = c; bd = [dx, dy]; }
+          }
+          if (bd) { S.breakDir = bd; S.breakT = 2.5; best = bd; S.mode = '突圍'; S.dirIdx = -1; }
+        }
+      }
     }
 
     // 卡牆偵測：一直按方向卻沒移動 → 換到最空曠的方向 0.5 秒
