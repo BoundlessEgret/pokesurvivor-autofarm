@@ -16,7 +16,7 @@
 1. 先安裝 [Tampermonkey](https://www.tampermonkey.net/) 或 [Violentmonkey](https://violentmonkey.github.io/)
 2. 安裝腳本：
    - [Greasy Fork 頁面](https://greasyfork.org/scripts/602469)，按「安裝腳本」
-   - 或直接開 [`dist/pokesurvivor-autofarm.user.js`](https://github.com/BoundlessEgret/pokesurvivor-autofarm/raw/main/dist/pokesurvivor-autofarm.user.js)，油猴會跳出安裝畫面
+   - 或直接開 [`dist/pokesurvivor-autofarm.user.js`](https://github.com/BoundlessEgret/pokesurvivor-autofarm/releases/latest/download/pokesurvivor-autofarm.user.js)，油猴會跳出安裝畫面
 3. 重新整理 pokesurvivor.com，左上角會出現「PSBot 自動掛機」面板
 
 > Chrome 新版的 Tampermonkey 需要在擴充功能的詳細資料裡打開「允許使用者指令碼」才會執行。
@@ -149,7 +149,7 @@ An unofficial auto-farm bot for [PokéSurvivor](https://pokesurvivor.com/). It h
 
 **Install** (pick one):
 
-- **Userscript** (updates automatically): install [Tampermonkey](https://www.tampermonkey.net/) or [Violentmonkey](https://violentmonkey.github.io/), then install from [Greasy Fork](https://greasyfork.org/scripts/602469) or open [`dist/pokesurvivor-autofarm.user.js`](https://github.com/BoundlessEgret/pokesurvivor-autofarm/raw/main/dist/pokesurvivor-autofarm.user.js). In recent versions of Chrome, Tampermonkey needs "Allow User Scripts" turned on in the extension's details page.
+- **Userscript** (updates automatically): install [Tampermonkey](https://www.tampermonkey.net/) or [Violentmonkey](https://violentmonkey.github.io/), then install from [Greasy Fork](https://greasyfork.org/scripts/602469) or open [`dist/pokesurvivor-autofarm.user.js`](https://github.com/BoundlessEgret/pokesurvivor-autofarm/releases/latest/download/pokesurvivor-autofarm.user.js). In recent versions of Chrome, Tampermonkey needs "Allow User Scripts" turned on in the extension's details page.
 - **Chrome extension** (no auto-update; the panel shows a link when a new version is out): download the zip from [Releases](https://github.com/BoundlessEgret/pokesurvivor-autofarm/releases) and unzip it. Then go to `chrome://extensions`, turn on Developer mode and choose "Load unpacked".
 
 **Use**: choose your Pokémon in the main menu, then toggle the panel (top-left) to ON or press **F8**. **Shift+F8** brings the panel back if you drag it off-screen. Keep the game tab visible, because browsers pause background tabs.

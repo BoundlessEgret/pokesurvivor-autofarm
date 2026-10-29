@@ -2,7 +2,7 @@
 // @name         PokéSurvivor 自動掛機 (PSBot)
 // @name:en      PokéSurvivor Auto-Farm (PSBot)
 // @namespace    https://github.com/BoundlessEgret/pokesurvivor-autofarm
-// @version      1.8.12
+// @version      1.8.13
 // @description  PokéSurvivor 自動走位躲招、選卡、綁羈絆、進神祕裂縫、處理事件（Gholdengo、求救、祭壇…）、自動再開一局
 // @description:en Auto movement & dodging, card picks, bonds, rifts, events (Gholdengo, rescues, altars…) and auto restart for PokéSurvivor
 // @author       BoundlessEgret
@@ -14,6 +14,8 @@
 // @inject-into  page
 // @homepageURL  https://github.com/BoundlessEgret/pokesurvivor-autofarm
 // @supportURL   https://github.com/BoundlessEgret/pokesurvivor-autofarm/issues
+// @updateURL    https://github.com/BoundlessEgret/pokesurvivor-autofarm/releases/latest/download/pokesurvivor-autofarm.user.js
+// @downloadURL  https://github.com/BoundlessEgret/pokesurvivor-autofarm/releases/latest/download/pokesurvivor-autofarm.user.js
 // ==/UserScript==
 
 /* PokéSurvivor 自動掛機 — 在頁面世界 (MAIN) 於 document_start 執行。
@@ -27,7 +29,7 @@
   'use strict';
   const HOOK_KEY = 'Game';
   const STORE_KEY = 'psbot.v1';
-  const VERSION = '1.8.12';   // 改程式時記得跟 manifest.json 一起改，面板標題會顯示，用來確認瀏覽器跑的是不是新版
+  const VERSION = '1.8.13';   // 改程式時記得跟 manifest.json 一起改，面板標題會顯示，用來確認瀏覽器跑的是不是新版
   const log = (...a) => console.log('%c[PSBot]', 'color:#ff8ad8', ...a);
 
   // ---------- 1. 抓命名空間 ----------

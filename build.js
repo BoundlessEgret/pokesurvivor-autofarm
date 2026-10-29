@@ -30,6 +30,8 @@ const header = `// ==UserScript==
 // @inject-into  page
 // @homepageURL  ${repo}
 // @supportURL   ${repo}/issues
+// @updateURL    ${repo}/releases/latest/download/pokesurvivor-autofarm.user.js
+// @downloadURL  ${repo}/releases/latest/download/pokesurvivor-autofarm.user.js
 // ==/UserScript==
 
 `;
