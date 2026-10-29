@@ -2,7 +2,7 @@
 // @name         PokéSurvivor 自動掛機 (PSBot)
 // @name:en      PokéSurvivor Auto-Farm (PSBot)
 // @namespace    https://github.com/BoundlessEgret/pokesurvivor-autofarm
-// @version      1.8.0
+// @version      1.8.12
 // @description  PokéSurvivor 自動走位躲招、選卡、綁羈絆、進神祕裂縫、處理事件（Gholdengo、求救、祭壇…）、自動再開一局
 // @description:en Auto movement & dodging, card picks, bonds, rifts, events (Gholdengo, rescues, altars…) and auto restart for PokéSurvivor
 // @author       BoundlessEgret
@@ -27,7 +27,7 @@
   'use strict';
   const HOOK_KEY = 'Game';
   const STORE_KEY = 'psbot.v1';
-  const VERSION = '1.8.0';   // 改程式時記得跟 manifest.json 一起改，面板標題會顯示，用來確認瀏覽器跑的是不是新版
+  const VERSION = '1.8.12';   // 改程式時記得跟 manifest.json 一起改，面板標題會顯示，用來確認瀏覽器跑的是不是新版
   const log = (...a) => console.log('%c[PSBot]', 'color:#ff8ad8', ...a);
 
   // ---------- 1. 抓命名空間 ----------
@@ -62,10 +62,13 @@
     favorites: [382, 150],
     passiveFirst: true,// 被動強化 > 主動招式升級
     farm: true,        // 養怪：有範圍招時繞小圈讓怪擠成一團，範圍招一次打一大片（場上 ≥54 隻時新怪變精英，經驗 ×1.6）
+    lead: false,       // 預判射擊（實戰會描邊，預設關：直接打怪現在的位置，配合「拉開距離 / 站樁」走位）
     focus: true,       // 集火：接管遊戲的「手動瞄準」，單體彈一次只打一隻，挑打得死的先收
     // 每隻寶可夢的畢業配置：招式依序學習、依序建立羈絆；item = 想要的攜帶道具
     profiles: {
-      150: { moves: ['confusion', 'harden', 'nasty-plot', 'psychic'], item: 'shellbell' }, // 超夢
+      // 超夢：精神強念（12 發追蹤、穿透）排在詭計前面：念力 + 精神強念每秒輸出約是念力 + 詭計的 1.8 倍，
+      // 綁上去養怪模式就開始；詭計最後綁，+65% 一樣乘到兩招上
+      150: { moves: ['confusion', 'harden', 'psychic', 'nasty-plot'], item: 'shellbell' }, // 超夢
     },
     panelX: null, panelY: null, collapsed: false,
   };
@@ -76,6 +79,8 @@
   // 舊版內建的妙蛙種子 / 蓋歐卡配置不符合「開局招式 → 變硬 → 劍舞 / 詭計 → 範圍攻擊」，存檔裡還是原樣的就刪掉，改走自動模式
   for (const [dex, old] of Object.entries({ 1: 'energy-ball,nasty-plot,leaf-storm,giga-drain', 382: 'bubble,nasty-plot,aqua-ring,hydro-pump' }))
     if (cfg.profiles[dex] && (cfg.profiles[dex].moves || []).join() === old) delete cfg.profiles[dex];
+  // 存檔裡還是舊的超夢內建順序（詭計在精神強念前面）就換成新的；自己改過的不動
+  if (cfg.profiles[150] && (cfg.profiles[150].moves || []).join() === 'confusion,harden,nasty-plot,psychic') cfg.profiles[150] = Object.assign({}, cfg.profiles[150], { moves: DEFAULTS.profiles[150].moves.slice() });
   const save = () => { try { localStorage.setItem(STORE_KEY, JSON.stringify(cfg)); } catch {} };
 
   const stats = { runs: 0, kills: 0, coins: 0, best: 0, startedAt: Date.now() };
@@ -194,8 +199,10 @@
       // 配置外的招式一律不拿：綁完羈絆空出欄位也不拿。多學的招會在下次拿到羈絆時被遊戲強制綁成沒用的第二組
       return i >= 0 ? 900 - i * 5 : -100;
     }
-    // 自動模式（沒有設定配置的寶可夢），照一般玩家的配法：
-    // 開局招式 → 變硬 → 劍舞（物攻）/ 詭計（特攻）→ 第二招攻擊（範圍越大越好，用來清怪）。
+    // 自動模式（沒有設定配置的寶可夢）：
+    // 開局招式 → 變硬 → 第二招攻擊（範圍越大越好）→ 劍舞（物攻）/ 詭計（特攻）。
+    // 範圍招排在增益前面：潮旋吸住 1 隻怪的輸出就超過水槍，詭計加在水槍上只多約 +65% 單體；
+    // 範圍招綁上主動欄位養怪模式才會開始，早一個秘境綁就早一個秘境滾雪球。
     // 變硬、劍舞、詭計是一般系招式，每隻都學得到；其他增益不拿，第二招攻擊要留位置給還沒拿到的變硬 / 強化
     const m = ns.Moves.BY_ID[id];
     if (!m) return 0;
@@ -208,14 +215,18 @@
     if (atk === 0) return 860;
     if (p.maxMoves - p.slots.length - need < 1) return -100;
     if (atk >= 2) return -100;  // 4 招都齊了就不再學：綁羈絆後空出欄位也不拿（多學的招會被遊戲強制綁成沒用的第二組）
-    return atk === 0 ? 860 : 800 + aoeScore(ns, p, m);
+    // 只有「持續打一個區域」的範圍招（潮旋會把怪吸成一團、光環、繞身）排在劍舞 / 詭計（865）前面、變硬（870）後面；
+    // 放射狀（泡沫）、連鎖、彈跳之類前期怪少時大多打空、也不聚怪，照舊排在增益後面
+    const aoe = aoeScore(ns, p, m);
+    return aoe >= 20 && EARLY_AOE.includes(m.kind) ? 868 : 800 + aoe;
   }
 
   // 主力增益：物攻用劍舞、特攻用詭計
   function atkBuffOf(ns, p) { return ns.Stats.sideOf(p.mon) === 'physical' ? 'swords-dance' : 'nasty-plot'; }
   // 第二招攻擊挑範圍大的：放射狀 / 光環 / 落石 / 漩渦 / 繞身 / 旋轉 > 彈跳 / 連鎖 / 推開 > 扇形 / 光束 > 單體。
   // 同屬性加分；太爛的（近戰、衝刺、拖尾）給 450，低於重抽門檻，有重抽次數時會先重抽等更好的
-  const AOE_PRI = { nova: 40, aura: 38, meteor: 36, vortex: 35, orbit: 34, spin: 33, bounce: 31, chain: 30, shove: 29, quake: 27, cone: 26, charge: 24, stun: 22, beam: 22, boomerang: 20, homing: 18, projectile: 12, turret: 12, mine: 8 };
+  const AOE_PRI = { vortex: 45, nova: 40, aura: 38, meteor: 36, orbit: 34, spin: 33, bounce: 31, chain: 30, shove: 29, quake: 27, cone: 26, charge: 24, stun: 22, beam: 22, boomerang: 20, homing: 18, projectile: 12, turret: 12, mine: 8 };
+  const EARLY_AOE = ['vortex', 'aura', 'orbit'];
   function aoeScore(ns, p, m) {
     if (!(m.kind in AOE_PRI)) return -350;
     const fit = m.cat ? ns.Stats.fit(p.mon, m.cat) : 1;
@@ -238,6 +249,9 @@
       if (c.color === '#ffd23f') return 980;          // 拿了馬上進化，只輸給「進化」本身
       if (evoNeeds.has(id)) return 700;               // 先拿好進化要的被動，招式滿級時就能直接進化
       // 學習 > 磁鐵（範圍小時）> 護甲（每張 -6% 受到傷害，上限 70%，撐到第 30 分鐘要靠它）
+      // 輸出溢出（怪一出來就被清光、場上平均不到 25 隻）：多的傷害換不到經驗，學習（經驗 ×1.12）排到招式升級前面，
+      // 只輸給進化和進化要的被動
+      if (id === 'xp' && S.spawnLimited) return 660;
       const pri = id === 'def' && (p.dmgReduce || 0) < 0.69 ? 70 : id === 'mag' && (p.magnet || 78) < 260 ? 72 : (STAT_PRI[id] || 20);
       return (cfg.passiveFirst ? 500 : 300) + pri;
     }
@@ -274,12 +288,13 @@
   function bondRank(ns, p, mv) {
     const prof = profileOf(ns);
     if (prof) { const i = prof.moves.indexOf(mv.id); return i >= 0 ? i : 50; }
-    // 自動：開局招式（第一個學到的攻擊招）→ 變硬 → 劍舞 / 詭計 → 其他攻擊招
+    // 自動：開局招式（第一個學到的攻擊招）→ 變硬 → 潮旋類（持續範圍）→ 劍舞 / 詭計 → 其他攻擊招
     const first = p.moves.find(x => x.kind !== 'buff');
     if (first && mv.id === first.id) return 0;
     if (mv.id === 'harden') return 1;
-    if (mv.id === atkBuffOf(ns, p)) return 2;
-    return mv.kind === 'buff' ? 10 : 3;
+    if (EARLY_AOE.includes(mv.kind)) return 2;
+    if (mv.id === atkBuffOf(ns, p)) return 3;
+    return mv.kind === 'buff' ? 10 : 4;
   }
   function chooseBond(ns, opt) {
     const p = ns.Game.player;
@@ -322,6 +337,10 @@
     if (!p || p.dead || ns.Game.state !== 'playing') return;
     hookAim(ns, p);
     const now = performance.now();
+    // 場上怪數的平滑平均（約 20 秒）：平均不到 25 隻 = 輸出溢出、經驗卡在出怪速度
+    const cnt = ns.EnemyMgr.count ?? ns.EnemyMgr.all().length;
+    const busy = (ns.Rift && ns.Rift.inArena) || (ns.Judgment && ns.Judgment.active);
+    if (!busy) { S.fieldAvg = S.fieldAvg == null ? cnt : S.fieldAvg + (cnt - S.fieldAvg) * 0.01; S.spawnLimited = ns.Game.st.time > 60 && S.fieldAvg < 25; }
     if (now - S.lastSlotCheck > 600 && p.slots.length > 1 && !p.hasItem?.('choiceband')) {
       S.lastSlotCheck = now;
       const prof = profileOf(ns);
@@ -360,6 +379,13 @@
       }
       return orig.call(this);
     };
+    // 遊戲拿到方向後會自己挑「那個方向上最近的怪」當鎖定目標（潮旋放在牠身上）；改成直接鎖集火的那隻
+    const origAlong = proto.enemyAlong;
+    if (typeof origAlong === 'function') proto.enemyAlong = function (all, a) {
+      const fe = S.focusEnemy;
+      if (cfg.on && cfg.focus && this === ns.Game.player && fe && !fe.dead) return fe;
+      return origAlong.call(this, all, a);
+    };
     S.aimHooked = true;
   }
   // 審判：阿爾宙斯打不死（只記 5% → 1% 的傷害給傷害排行），傳說每 5 秒來一隻、沒有上限、血一隻比一隻多 25%，
@@ -382,6 +408,16 @@
       if (d > 1 && d < reach) list.push({ e, dx, dy, d });
     }
     if (!list.length) return null;
+    // 只集火「子彈打得到」的怪：被樹 / 石頭 / 牆擋住的不選（不然會為了打牠一直跑去找角度，光球都不撿）
+    const W = ns.World;
+    if (W && W.projectileBlock) {
+      const lift = ns.LIFT || 0;
+      const clear = c => { const n = Math.ceil(c.d / 16); for (let i = 1; i < n; i++) if (W.projectileBlock(p.x + c.dx * i / n, p.y + c.dy * i / n - lift, 4)) return false; return true; };
+      list.sort((a, b) => a.d - b.d);
+      const vis = list.slice(0, 24).filter(clear);
+      if (!vis.length) return null;   // 一隻都打不到：交回遊戲的自動瞄準，走位那邊會去找射擊角度
+      list.length = 0; list.push(...vis);
+    }
     if (judging && arc) list.push(Object.assign(arc, { block: true }));
     const dmg = (m.dmg || 10) * (p.atkFor ? p.atkFor(m) : 1);
     const mult = e => (ns.Types && ns.Types.mult ? ns.Types.mult(m.type, e.types) : 1) * (ns.Weather && ns.Weather.mult ? ns.Weather.mult(m.type) : 1);
@@ -404,8 +440,47 @@
       }
       if (s > bs) { bs = s; best = c; }
     }
-    S.focusId = best.e.id;
-    return Math.atan2(best.e.y - p.y, best.e.x - p.x);
+    S.focusId = best.e.id; S.focusEnemy = best.e;
+    if (!cfg.lead) return Math.atan2(best.e.y - p.y, best.e.x - p.x);
+    // 預判：子彈飛過去要 距離 ÷ 子彈速度 秒，怪在動就往牠到時候的位置打（速度用前幾幀的位置估）
+    const ev = S.ev || (S.ev = new Map()), now = performance.now(), e = best.e;
+    const o = ev.get(e.id);
+    // 速度取約 0.25 秒的平滑平均，另外記「速率」的平均：穩定往一個方向走時兩者差不多（一致度≈1），
+    // 被潮旋吸住原地亂晃時平均速度會互相抵銷（一致度≈0）。只照一致的那部分預判，亂晃的就打牠現在的位置
+    // 一致度用比較長的 0.6 秒平均算（短週期的亂晃在長平均裡會抵銷），速度本身用 0.25 秒的
+    let vx = 0, vy = 0, sx = 0, sy = 0, sp = 0;
+    if (o && now - o.t > 0 && now - o.t < 300) {
+      const dts = (now - o.t) / 1000, ix = (e.x - o.x) / dts, iy = (e.y - o.y) / dts, a = 1 - Math.exp(-dts / 0.25), b = 1 - Math.exp(-dts / 0.6);
+      vx = o.vx + (ix - o.vx) * a; vy = o.vy + (iy - o.vy) * a;
+      sx = o.sx + (ix - o.sx) * b; sy = o.sy + (iy - o.sy) * b; sp = o.sp + (Math.hypot(ix, iy) - o.sp) * b;
+    }
+    ev.set(e.id, { x: e.x, y: e.y, t: now, vx, vy, sx, sy, sp });
+    const cons = sp > 1 ? Math.min(1, Math.hypot(sx, sy) / sp) : 0;
+    const lead = cons > 0.7 ? (cons - 0.7) / 0.3 : 0;
+    vx *= lead; vy *= lead;
+    if (ev.size > 200) ev.clear();
+    // 會追人的怪（大部分小怪）不是照原本的方向走，而是一直轉向「你下一刻的位置」：
+    // 人往側邊閃，牠跟著轉，照牠前幾幀的方向預判反而整排打到牠背後（人體描邊機）。
+    // 所以追人的怪改成：算出子彈飛到時你在哪、牠朝那裡追了多遠；遠程 / 小偷才用看到的速度
+    const pp = S.pPrev;
+    let pvx = 0, pvy = 0;
+    if (pp && now - pp.t > 0 && now - pp.t < 300) { const k = 1000 / (now - pp.t); pvx = (p.x - pp.x) * k; pvy = (p.y - pp.y) * k; }
+    S.pPrev = { x: p.x, y: p.y, t: now };
+    // 被潮旋吸住、卡在怪群裡的怪不會照速度追過來：看到的速度真的是「朝你跑」才用追人模型
+    const ov = Math.hypot(vx, vy), ed = Math.hypot(p.x - e.x, p.y - e.y) || 1;
+    const chaser = e.spd > 0 && !['ranged', 'thief', 'turret'].includes(e.behavior) && lead > 0.5 && ov > 0.3 * e.spd && (vx * (p.x - e.x) + vy * (p.y - e.y)) / (ov * ed) > 0.5;
+    const spd = m.speed || 300;
+    let tx = e.x, ty = e.y;
+    for (let i = 0; i < 3; i++) {
+      const t = Math.min(m.life || 1.5, Math.hypot(tx - p.x, ty - p.y) / spd);
+      if (chaser) {
+        const fx = p.x + pvx * t, fy = p.y + pvy * t, gx = fx - e.x, gy = fy - e.y, gd = Math.hypot(gx, gy) || 1;
+        // 用實際觀察到的速度（緩速、地形、天氣、擠在怪群裡都會變慢），不是怪的標準速度
+        const step = Math.min(Math.min(e.spd, sp) * t, Math.max(0, gd - (e.r || 12) - (p.r || 12)));
+        tx = e.x + gx / gd * step; ty = e.y + gy / gd * step;
+      } else { tx = e.x + vx * t; ty = e.y + vy * t; }
+    }
+    return Math.atan2(ty - p.y, tx - p.x);
   }
 
   // ---------- 8. 走位 AI ----------
@@ -546,7 +621,7 @@
     }
     // 對著牆打超過 0.4 秒：在被鎖定的那隻怪周圍找「看得到牠、又站得住」的點，用 A* 繞過去
     const lt = S.losTarget;
-    if (lt && !lt.dead && !lt.arceus && !(ns.Judgment && ns.Judgment.active) && S.losBadT > 0.4 && W && W.isFree && W.projectileBlock) {
+    if (lt && !lt.dead && !lt.arceus && !(ns.Judgment && ns.Judgment.active) && S.losBadT > 0.25 && W && W.isFree && W.projectileBlock) {
       const clearShot = (x, y) => { const d = Math.hypot(lt.x - x, lt.y - y), n = Math.ceil(d / 12); for (let i = 1; i < n; i++) if (W.projectileBlock(x + (lt.x - x) * i / n, y + (lt.y - y) * i / n - (ns.LIFT || 0), 4)) return false; return true; };
       const spots = [];
       for (const r of [140, 220, 300]) for (let k = 0; k < 24; k++) {
@@ -606,7 +681,15 @@
   }
 
   function pickTarget(ns, p, enemies, hpPct, fear) {
-    const pl = plan(ns, p, hpPct);
+    let pl = plan(ns, p, hpPct);
+    // 找射擊角度是最低優先：附近有光球可撿就先撿（經驗比較重要），撿完還打不到才去換位置
+    if (pl && pl.key.startsWith('los') && !S.losDefer) {
+      S.losDefer = true;
+      const orb = pickTarget(ns, p, enemies, hpPct, fear);
+      S.losDefer = false;
+      if (orb && orb.orb) return orb;
+    }
+    if (pl && S.losDefer && pl.key.startsWith('los')) pl = null;
     if (pl) {
       const c = pl.c;
       const wp = waypoint(ns, p, pl.path);
@@ -653,7 +736,7 @@
       let left = 0;
       for (const k of items) if (Math.abs(k.x - g.x) < clR && Math.abs(k.y - g.y) < clR) left += wOf(k);
       // 那一團的中心進到磁吸範圍就夠了，剩下的會自己飛過來，不用再走過去
-      if (left > 0 && d > mag * 0.85 && !(S.farm && d > 360)) return { x: g.x, y: g.y, w: 2, mode: '撿光球', orb: true };
+      if (left > 0 && d > mag * 0.85 && !(S.farm && d > 440)) return { x: g.x, y: g.y, w: 2, mode: '撿光球', orb: true };
     }
     let best = null, bestS = 0;
     const [ox, oy] = S.out || [0, 0];
@@ -662,7 +745,7 @@
     for (const k of seeds) {
       const dx = k.x - p.x, dy = k.y - p.y, d = Math.hypot(dx, dy);
       if (d < mag * 0.9) continue;   // 已經在磁吸範圍內 / 邊上：會自己飛過來，不用刻意去撿
-      if (S.farm && d > 320) continue;   // 養怪中不跑遠：光球掉在怪群旁邊，繞圈時就吸到了；遠的等怪少了再撿
+      if (S.farm && d > 400) continue;   // 養怪中不跑遠：光球掉在怪群旁邊，繞圈時就吸到了；遠的等怪少了再撿
       let cluster = 0;
       for (const o of items) if (Math.abs(o.x - k.x) < clR && Math.abs(o.y - k.y) < clR) cluster += wOf(o);
       let crowd = 0;
@@ -707,9 +790,9 @@
     // 血掉到 45% 以下就退回一般走位，回到 65% 再開
     const aoe = p.activeGroup && p.activeGroup().some(m => FARM_KINDS.includes(m.kind));
     S.farm = cfg.farm && aoe && !(ns.Rift && ns.Rift.inArena) && !(ns.Judgment && ns.Judgment.active) && (S.farm ? hpPct > 0.45 : hpPct > 0.65);
-    // 養怪時本來就要待在怪堆旁：小怪的貼身 / 碰撞幾乎不算危險（貝殼之鈴、回血撐得住），
-    // 不然一靠近怪群危險度就超過門檻，整局都在「躲避」，小圈根本繞不起來。首領、地面預警照樣躲
-    if (S.farm) fear = Math.min(fear, 0.08);
+    // 養怪時要待在怪群旁邊：小怪的危險度降一點，不然一靠近就切去「躲避」，圈繞不起來。
+    // 但不能降太多（v1.8.0 降到 0.08 會直接衝進怪潮邊緣硬扛）；血越少越怕。首領、地面預警照樣躲
+    if (S.farm) fear = Math.min(fear, hpPct > 0.8 ? 0.15 : 0.2);
 
     const near = [];
     for (const e of ns.EnemyMgr.all()) {
@@ -754,7 +837,7 @@
     const hazFrac = h => Math.min(1, (h.pct ? Math.max(h.dmg || 0, p.maxHp * h.pct) : (h.dmg || 0)) * (h.pure ? 1 : red) / p.maxHp);
     // 扣 10% 血 ≈ 成本 9~16，血越少越在意。被小怪碰一下（有無敵時間、不會疊加）在血量健康時不太在意，
     // 不然撿光球時每隻迎面走來的怪都會讓人轉頭閃一下又轉回來（抽搐）
-    const DMG_W = hpPct < 0.6 ? 160 : 90, TOUCH_W = S.farm ? 8 : hpPct < 0.35 ? 160 : hpPct < 0.6 ? 100 : 30;
+    const DMG_W = hpPct < 0.6 ? 160 : 90, TOUCH_W = S.farm ? (hpPct > 0.8 ? 16 : 24) : hpPct < 0.35 ? 160 : hpPct < 0.6 ? 100 : 30;
     // 子彈的危險度：養怪時照實際傷害打折（小怪的子彈扣 2% 血只算三成多），痛的（首領）照舊
     const shotW = sh => S.farm ? Math.min(1, 0.2 + 8 * hitFrac(sh.dmg, false)) : 1;
     const danger = (x, y, tAhead) => {
@@ -811,6 +894,8 @@
     };
     const aimTargets = near.slice().sort((a, b) => Math.hypot(a.x - p.x, a.y - p.y) - Math.hypot(b.x - p.x, b.y - p.y)).slice(0, 10);
     const lockedFrom = (x, y) => {
+      const fe = cfg.focus && S.focusEnemy && !S.focusEnemy.dead && !S.focusEnemy.arceus ? S.focusEnemy : null;
+      if (fe && Math.hypot(fe.x - x, fe.y - y) < 520) return fe;   // 集火中：看的是正在打的那隻
       let boss = null, nearest = null, nd = 520;
       for (const e of aimTargets) {
         if (e.arceus) continue;   // 阿爾宙斯打不死，不為了打牠去換位置（舊版會在牠身邊找射擊角度，直接走過去送死）
@@ -827,7 +912,8 @@
     S.losTarget = lockedFrom(p.x, p.y);
     S.losBadT = blockedShot(p.x, p.y) || blockedFrac(p.x, p.y) >= 0.5 ? (S.losBadT || 0) + dt : 0;
     if (S.losBadT === 0 && S.plan && S.plan.key.startsWith('los')) S.plan = null;   // 已經打得到了，不用再往那個點走
-    const losW = S.losBadT > 0.4 ? 3 : 1.5;   // 已經對著牆打一陣子了，更積極換位置
+    // 打不到就沒經驗：對著牆打超過 0.25 秒就積極換位置（比閃小傷害重要），除非正在做更重要的事（plan 會先選它們）
+    const losW = S.losBadT > 0.25 ? 6 : 2;
 
     const here = danger(p.x, p.y, 0);
 
@@ -835,6 +921,7 @@
     // 怪死在路上掉的光球，下一圈經過時順便吸走。
     // 圈心固定（S.loopC），方向固定（S.spin）。追小偷 / 進裂縫回來後，或圈上被擋住，就以目前位置重新畫圈
     let kite = null;
+    S.stand = false;
     // 有目標（光球、事件…）就專心走過去，不同時繞圈；只有真的沒事做、或正在被圍攻時才遛怪。
     // 兩股力量同時拉，就會前後來回跑
     const hadTarget = S.hadTarget; S.hadTarget = !!target && here <= 2;
@@ -874,19 +961,77 @@
       if (kl > 0.01) kite = { x: kx / kl, y: ky / kl, w };
     } else if ((!target || here > 2) && !(target && target.hold) && !(target && target.chase && here < 4)) {
       if (hadTarget) S.loopC = null;   // 剛撿完光球 / 辦完事：以目前的前進方向重新畫圈，不要被拉回舊的圈上（會掉頭）
-      let R = S.farm ? 150 : 380, c = S.loopC;
+      let R = 380, c = S.loopC;
       const v = S.out || [1, 0];
       const anchor = () => ({ x: p.x - R * S.spin * v[1], y: p.y + R * S.spin * v[0] }); // 讓目前位置剛好在圈上、前進方向是切線
-      if (!c || Math.abs(Math.hypot(p.x - c.x, p.y - c.y) - R) > R * 0.6) c = S.loopC = anchor();
-      let rx = p.x - c.x, ry = p.y - c.y; const rd = Math.hypot(rx, ry) || 1; rx /= rd; ry /= rd;
-      // 往圈上「前方 0.5 弧度」的那一點跑：自然沿著圓走，偏離時會被拉回圈上
-      const ang = Math.atan2(ry, rx) + S.spin * 0.5;
-      let kx = c.x + Math.cos(ang) * R - p.x, ky = c.y + Math.sin(ang) * R - p.y;
-      const kl = Math.hypot(kx, ky) || 1; kx /= kl; ky /= kl;
-      kite = { x: kx, y: ky, w: 1.6 + Math.min(1.5, here * 0.4) };
-      // 圈上前方被牆 / 陷阱 / 水擋住超過 0.6 秒：反方向繞，並以目前位置重新畫圈
-      S.spinBlockT = pathLen(kx, ky, 90) < 60 ? S.spinBlockT + dt : 0;
-      if (S.spinBlockT > 0.6) { S.spin *= -1; S.spinBlockT = 0; S.loopC = null; }
+      // 養怪：圈心放在怪群中心、半徑 = 怪群半徑 + 130，沿著怪群外圍繞，怪往內擠成一團給範圍招打，
+      // 人保持在外面。圈心慢慢跟著怪群移動（不要每幀跳）
+      let herd = null;
+      if (S.farm) {
+        let n = 0, hx = 0, hy = 0;
+        for (const e of near) if (!e.boss && Math.hypot(e.x - p.x, e.y - p.y) < 400) { n++; hx += e.x; hy += e.y; }
+        if (n >= 6) {
+          hx /= n; hy /= n;
+          let sp = 0;
+          for (const e of near) if (!e.boss && Math.hypot(e.x - p.x, e.y - p.y) < 400) sp += Math.hypot(e.x - hx, e.y - hy);
+          herd = { x: hx, y: hy, r: sp / n };
+        }
+      }
+      // 怪稀疏時（400px 內不到 6 隻）不繞圈：繞圈 = 一直側移，追過來的怪相對你是橫向移動，水槍（直線、不追蹤）
+      // 很容易描邊；側移撞牆時還會原地抽搐找角度被貼臉。改成：太近就往正後方拉開，中距離站著打
+      //（怪直線朝你走過來，幾乎必中），太遠才慢慢靠近。後面被牆擋住才退回繞圈
+      let sparse = null;
+      if (!herd) {
+        let n = 0, cx = 0, cy = 0, ws = 0, dmin = Infinity;
+        for (const e of near) {
+          const d = Math.hypot(e.x - p.x, e.y - p.y);
+          if (d > 450) continue;
+          if (!e.boss) n++;
+          const w = (e.boss ? 3 : 1) / Math.max(40, d);
+          cx += e.x * w; cy += e.y * w; ws += w; dmin = Math.min(dmin, d - (e.r || 10));
+        }
+        if (n < 6 && ws > 0) {
+          cx /= ws; cy /= ws;
+          let ax = p.x - cx, ay = p.y - cy; const al = Math.hypot(ax, ay) || 1; ax /= al; ay /= al;
+          // 三個狀態之間有緩衝（退到 300 才停、靠近到 340 才停），而且每個狀態至少維持 0.6 秒，
+          // 不然怪在門檻附近一進一出，就會「退、停、退、停」一直抽
+          const st = S.sparseSt, held = gt - (S.sparseAt || 0) < 0.6;
+          let want = st || 'stand';
+          if (!held) {
+            if (dmin < 200 || (st === 'back' && dmin < 300)) want = 'back';
+            else if (dmin > 430 || (st === 'near' && dmin > 340)) want = 'near';
+            else want = 'stand';
+          }
+          if (dmin < 120) want = 'back';   // 已經快被貼臉：不管停留時間，馬上退
+          if (want === 'back' && pathLen(ax, ay, 120) < 60) want = null;   // 後面是牆：退回繞圈
+          if (want !== st) { S.sparseSt = want; S.sparseAt = gt; }
+          if (want === 'back') sparse = { k: { x: ax, y: ay, w: 2.4 }, label: '拉開距離' };
+          else if (want === 'near') sparse = { k: { x: -ax, y: -ay, w: 0.6 }, label: '靠近' };
+          else if (want === 'stand') { S.stand = true; sparse = { k: { x: ax, y: ay, w: 0.3 }, label: '站樁輸出' }; }
+        }
+      }
+      if (sparse) { kite = sparse.k; S.kiteLabel = sparse.label; }
+      else {
+        S.kiteLabel = S.farm ? '養怪' : '遛怪';
+        if (herd) {
+          R = Math.max(140, Math.min(240, herd.r + (hpPct > 0.8 ? 80 : 120)));   // 貼著怪群邊緣：太遠潮旋放不到主群、怪死的位置磁鐵也吸不到
+          c = S.loopC = S.loopC && S.herdLoop ? { x: S.loopC.x + (herd.x - S.loopC.x) * Math.min(1, dt * 2), y: S.loopC.y + (herd.y - S.loopC.y) * Math.min(1, dt * 2) } : { x: herd.x, y: herd.y };
+          S.herdLoop = true;
+        } else {
+          if (S.herdLoop) { S.herdLoop = false; c = S.loopC = null; }
+          if (S.farm) R = 220;
+          if (!c || Math.abs(Math.hypot(p.x - c.x, p.y - c.y) - R) > R * 0.6) c = S.loopC = anchor();
+        }
+        let rx = p.x - c.x, ry = p.y - c.y; const rd = Math.hypot(rx, ry) || 1; rx /= rd; ry /= rd;
+        // 往圈上「前方 0.5 弧度」的那一點跑：自然沿著圓走，偏離時會被拉回圈上
+        const ang = Math.atan2(ry, rx) + S.spin * 0.5;
+        let kx = c.x + Math.cos(ang) * R - p.x, ky = c.y + Math.sin(ang) * R - p.y;
+        const kl = Math.hypot(kx, ky) || 1; kx /= kl; ky /= kl;
+        kite = { x: kx, y: ky, w: 1.6 + Math.min(1.5, here * 0.4) };
+        // 圈上前方被牆 / 陷阱 / 水擋住超過 0.6 秒：反方向繞，並以目前位置重新畫圈
+        S.spinBlockT = pathLen(kx, ky, 90) < 60 ? S.spinBlockT + dt : 0;
+        if (S.spinBlockT > 0.6) { S.spin *= -1; S.spinBlockT = 0; S.loopC = null; }
+      }
     }
 
     // 地面預警用「落下的那一刻我人在哪」來判斷：沿這個方向直走，每個預警倒數結束時的位置在範圍內才算中招。
@@ -933,7 +1078,7 @@
     let bi = -1;
     for (let i = 0; i < 16; i++) if (sm[i] < Infinity && (bi < 0 || sm[i] < sm[bi])) bi = i;
     if (!target) S.wanderA += dt * 0.35;
-    S.mode = judging ? (here > 2 ? '審判：閃避' : '審判：繞場') : arena ? (here > 2 ? '秘境：閃避' : '秘境：打 BOSS') : here > 2 ? '躲避' : target && (target.chase || target.hold) ? target.mode : kite ? (S.farm ? '養怪' : '遛怪') : target ? target.mode : '閒逛';
+    S.mode = judging ? (here > 2 ? '審判：閃避' : '審判：繞場') : arena ? (here > 2 ? '秘境：閃避' : '秘境：打 BOSS') : here > 2 ? '躲避' : target && (target.chase || target.hold) ? target.mode : kite ? (S.kiteLabel || '遛怪') : target ? target.mode : '閒逛';
     // 每個方向 12px 內都被判定擋住（被擠進樹石縫裡）：不要站著等死，往最空的方向硬擠出去
     const escape = () => {
       let bd = null, bs = -Infinity;
@@ -956,9 +1101,9 @@
     for (const h of hazards) if (!h.hit && inHazard(h, p.x, p.y, p.r + 4)) urgent += 25;
     const emergency = urgent > 4;
     S.holdT -= dt;
-    const keep = S.dirIdx >= 0 && sm[S.dirIdx] < Infinity && (emergency ? sm[S.dirIdx] - sm[bi] < 3 && S.holdT > 0 : S.holdT > 0 || sm[S.dirIdx] - sm[bi] < 0.6);
+    const keep = S.dirIdx >= 0 && sm[S.dirIdx] < Infinity && (emergency ? sm[S.dirIdx] - sm[bi] < 3 && S.holdT > 0 : S.holdT > 0 || sm[S.dirIdx] - sm[bi] < (S.farm ? 1.2 : 0.6));
     if (keep) bi = S.dirIdx;
-    else if (bi !== S.dirIdx) { S.dirIdx = bi; S.holdT = emergency ? 0.25 : 0.15; }
+    else if (bi !== S.dirIdx) { S.dirIdx = bi; S.holdT = emergency ? 0.25 : S.farm ? 0.3 : 0.15; }   // 養怪時方向至少維持 0.3 秒，不要躁
     let best = DIRS[bi];
     // 泉水 / 寶箱：到了就站著（有危險還是照躲）
     // 站著等有時間上限（泉水 10 秒、寶箱 6 秒、護送 20 秒），超過就放棄這個目標 30 秒，
@@ -981,6 +1126,12 @@
       const dx = target.x - p.x, dy = target.y - p.y, d = Math.hypot(dx, dy) || 1;
       const safe = !hazards.some(h => !h.hit && inHazard(h, p.x + dx / d * 30, p.y + dy / d * 30, p.r));
       if (safe && d > 4) best = [dx / d, dy / d];
+    }
+
+    // 站樁輸出：怪稀疏、在中距離、沒有危險和預警、打得到 → 站著不動，讓怪直線走過來吃水槍
+    if (S.stand && !emergency && here < 1.5 && !S.losBadT && !(target && target.orb) && !hazards.some(h => !h.hit && inHazard(h, p.x, p.y, p.r + 10))) {
+      S.mode = '站樁輸出'; S.wd = null; S.stuckT = 0; S.lastPos = [p.x, p.y];
+      return [0, 0];
     }
 
     // 被小怪包圍（身邊 70px 內 5 隻以上、8 個方位有 6 個被佔）：取樣會在幾個差不多爛的方向之間跳來跳去，
@@ -1347,6 +1498,7 @@
     <label><input type="checkbox" data-o="orbs">自動用寶珠</label>
     <label><input type="checkbox" data-o="farm">養怪（範圍招把怪聚成一團再打）</label>
     <label><input type="checkbox" data-o="focus">集火瞄準（打得死的先收）</label>
+    <label><input type="checkbox" data-o="lead">預判射擊（實驗中，可能描邊）</label>
     <label><input type="checkbox" data-o="restart">結束後自動再開一局</label>
     <label><input type="checkbox" data-o="noRank">掛機局不上排行榜</label>
     <label><input type="checkbox" data-o="upgrade">回主選單時自動買強化（花金幣）</label>
@@ -1433,7 +1585,8 @@
     setInterval(() => {
       renderBuild(false);
       const p = ns.Game.player, inRun = p && ns.Game.state !== 'ui';
-      const run = inRun ? `Lv${p.level} · HP ${Math.round(p.hp)}/${Math.round(p.maxHp)} · 擊倒 ${p.kills} · 羈絆券 ${p.bonds} · ${cfg.on ? S.mode || '' : '暫停'}\n欄位：${p.slots.map((g, i) => (i === p.active ? '▶' : '') + g.map(m => mvName(m.id)).join('+')).join(' | ')}` : '不在遊戲中';
+      const xpLine = inRun ? `經驗 ×${(p.xpMul || 1).toFixed(2)} · 場上 ${ns.EnemyMgr.count ?? ns.EnemyMgr.all().length}/64${S.spawnLimited ? ' · 怪不夠打（學習優先）' : ''}\n` : '';
+      const run = inRun ? xpLine + `Lv${p.level} · HP ${Math.round(p.hp)}/${Math.round(p.maxHp)} · 擊倒 ${p.kills} · 羈絆券 ${p.bonds} · ${cfg.on ? S.mode || '' : '暫停'}\n欄位：${p.slots.map((g, i) => (i === p.active ? '▶' : '') + g.map(m => mvName(m.id)).join('+')).join(' | ')}` : '不在遊戲中';
       const mins = Math.round((Date.now() - stats.startedAt) / 60000);
       // 遊戲的 CSS 會吃掉換行，所以一行一個 div
       const extra = [S.lastPartnerMsg && '夥伴：' + S.lastPartnerMsg, S.lastUpgradeMsg && '強化：' + S.lastUpgradeMsg, S.lastGachaMsg && '抽到：' + S.lastGachaMsg].filter(Boolean);
