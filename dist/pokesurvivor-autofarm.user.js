@@ -2,7 +2,7 @@
 // @name         PokéSurvivor 自動掛機 (PSBot)
 // @name:en      PokéSurvivor Auto-Farm (PSBot)
 // @namespace    https://github.com/BoundlessEgret/pokesurvivor-autofarm
-// @version      1.7.0
+// @version      1.8.0
 // @description  PokéSurvivor 自動走位躲招、選卡、綁羈絆、進神祕裂縫、處理事件（Gholdengo、求救、祭壇…）、自動再開一局
 // @description:en Auto movement & dodging, card picks, bonds, rifts, events (Gholdengo, rescues, altars…) and auto restart for PokéSurvivor
 // @author       BoundlessEgret
@@ -27,7 +27,7 @@
   'use strict';
   const HOOK_KEY = 'Game';
   const STORE_KEY = 'psbot.v1';
-  const VERSION = '1.7.0';   // 改程式時記得跟 manifest.json 一起改，面板標題會顯示，用來確認瀏覽器跑的是不是新版
+  const VERSION = '1.8.0';   // 改程式時記得跟 manifest.json 一起改，面板標題會顯示，用來確認瀏覽器跑的是不是新版
   const log = (...a) => console.log('%c[PSBot]', 'color:#ff8ad8', ...a);
 
   // ---------- 1. 抓命名空間 ----------
@@ -146,6 +146,11 @@
         stats.runs++; stats.kills += d.kills || 0; stats.coins += d.coins || 0;
         stats.best = Math.max(stats.best, d.time || 0);
         log(`run #${stats.runs}: ${Math.round(d.time)}s lv${d.level} kills ${d.kills} coins ${d.coins}`);
+        // 結算畫面幾秒後就被自動重開蓋掉：存一份到設定裡（保留最近 20 局），面板上隨時看得到
+        const j = d.judge;
+        cfg.history = [{ at: Date.now(), dex: ns.Game.player && ns.Game.player.dex, time: d.time, level: d.level, kills: d.kills, bosses: d.bosses, coins: d.coins, record: !!d.record,
+          judge: j ? { time: j.time, bosses: j.bosses, dmg: j.dmg } : null }].concat(cfg.history || []).slice(0, 20);
+        save();
         S.overAt = now();
       }
       return r;
@@ -348,42 +353,54 @@
     if (!proto || typeof proto.handAim !== 'function') return;
     const orig = proto.handAim;
     proto.handAim = function () {
-      if (this === ns.Game.player && !this.remote) {
-        try { const a = focusAim(ns, this); if (a != null) return a; } catch (e) { console.warn('[PSBot] aim', e); }
+      // 集火開著時滑鼠完全不參與：focusAim 讓出（首領 / 審判 / 沒有目標）就交回遊戲的自動瞄準，
+      // 不是交給「手動瞄準」的滑鼠方向。關掉 bot 或集火才恢復遊戲原本的行為
+      if (cfg.on && cfg.focus && this === ns.Game.player && !this.remote) {
+        try { return focusAim(ns, this); } catch (e) { console.warn('[PSBot] aim', e); return null; }
       }
       return orig.call(this);
     };
     S.aimHooked = true;
   }
+  // 審判：阿爾宙斯打不死（只記 5% → 1% 的傷害給傷害排行），傳說每 5 秒來一隻、沒有上限、血一隻比一隻多 25%，
+  // 而且跑得至少有你 80% 快。不打掉就越積越多，把人逼到牆邊。所以只集火傳說：挑最快打得死的
+  //（通常是先來的，血比較少），子彈路線上擋著阿爾宙斯的方向扣分（牠會把子彈吃掉）
   function focusAim(ns, p) {
-    if (!cfg.on || !cfg.focus || ns.Game.state !== 'playing' || (ns.Judgment && ns.Judgment.active)) return null;
+    if (!cfg.on || !cfg.focus || ns.Game.state !== 'playing') return null;
+    const judging = !!(ns.Judgment && ns.Judgment.active);
     const m = p.activeMove && p.activeMove();
     if (!m || m.kind !== 'projectile') return null;
     const reach = Math.min(520, (m.speed || 300) * (m.life || 1.5));
     const list = [];
+    let arc = null;
     for (const e of ns.EnemyMgr.all()) {
-      if (e.dead || e.arceus || e.silent) continue;
+      if (e.dead || e.silent) continue;
       const dx = e.x - p.x, dy = e.y - p.y, d = Math.hypot(dx, dy);
-      if (e.boss && d < 330) return null;
+      if (e.arceus) { if (d > 1) arc = { e, dx, dy, d }; continue; }
+      if (judging && !e.boss) continue;
+      if (!judging && e.boss && d < 330) return null;
       if (d > 1 && d < reach) list.push({ e, dx, dy, d });
     }
     if (!list.length) return null;
+    if (judging && arc) list.push(Object.assign(arc, { block: true }));
     const dmg = (m.dmg || 10) * (p.atkFor ? p.atkFor(m) : 1);
     const mult = e => (ns.Types && ns.Types.mult ? ns.Types.mult(m.type, e.types) : 1) * (ns.Weather && ns.Weather.mult ? ns.Weather.mult(m.type) : 1);
     const pierce = (m.pierce | 0) + 1, w = m.size || 6;
     let best = null, bs = -Infinity;
     for (const c of list) {
       const ux = c.dx / c.d, uy = c.dy / c.d, hits = [];
+      if (c.block) continue;
       for (const o of list) {
         const al = o.dx * ux + o.dy * uy;
-        if (al > 0 && Math.abs(o.dx * uy - o.dy * ux) < (o.e.r || 12) + w) hits.push([al, o.e]);
+        if (al > 0 && Math.abs(o.dx * uy - o.dy * ux) < (o.e.r || 12) + w + (o.block ? 18 : 0)) hits.push([al, o.e]);
       }
       hits.sort((a, b) => a[0] - b[0]);
       let s = -c.d / 3000;
       for (const [, e] of hits.slice(0, pierce)) {
+        if (e.arceus) { s -= 1; break; }
         const hd = dmg * mult(e), hp = Math.max(1, e.hp || 1);
         s += hd >= hp ? 1.2 : 0.6 * hd / hp;
-        if (e.id === S.focusId) s += 0.25;
+        if (e.id === S.focusId) s += 0.02 + 0.6 * Math.min(1, hd / hp);   // 正在打的那隻：照進度加分，快死的黏住，打不動的不會死咬
       }
       if (s > bs) { bs = s; best = c; }
     }
@@ -615,6 +632,15 @@
     let loose = 0;
     for (const k of all) if (!k.pulled && (k.kind === 'xp' || k.kind === 'xpBig')) loose += k.kind === 'xpBig' ? 3 : 1;
     const wOf = k => k.kind === 'heal' ? (hpPct < 0.7 ? 8 : 0.2) : k.kind === 'magnet' ? 5 + loose * 0.4 : (PICK_W[k.kind] ?? 1);
+    // 已經被磁吸住、在後面追的光球：飛行速度約 240 + 1400/距離 px/s，移速點高之後跟人差不多快，
+    // 一直跑就一直追不上（只有甩尾轉彎時才一次吸進來）。累積夠多、又落在後面時，往那團光球迎上去，
+    // 兩邊對衝一下就吸完
+    let pv = 0, px = 0, py = 0;
+    for (const k of all) if (k.pulled && (k.kind === 'xp' || k.kind === 'xpBig')) { const w = k.kind === 'xpBig' ? 3 : 1; pv += w; px += k.x * w; py += k.y * w; }
+    if (pv >= 6 && !(ns.Judgment && ns.Judgment.active)) {
+      px /= pv; py /= pv;
+      if (Math.hypot(px - p.x, py - p.y) > 60) return { x: px, y: py, w: 2.5, mode: '收經驗', orb: true };
+    }
     const items = all.filter(k => !k.pulled && !(k.kind === 'heal' && hpPct >= 0.95) && !onTrap(k) && !banned(k));
     const clR = Math.max(90, mag * 0.8);   // 一團的範圍：站在中心時磁吸大概蓋得住
     const g = S.orbGoal;
@@ -681,6 +707,9 @@
     // 血掉到 45% 以下就退回一般走位，回到 65% 再開
     const aoe = p.activeGroup && p.activeGroup().some(m => FARM_KINDS.includes(m.kind));
     S.farm = cfg.farm && aoe && !(ns.Rift && ns.Rift.inArena) && !(ns.Judgment && ns.Judgment.active) && (S.farm ? hpPct > 0.45 : hpPct > 0.65);
+    // 養怪時本來就要待在怪堆旁：小怪的貼身 / 碰撞幾乎不算危險（貝殼之鈴、回血撐得住），
+    // 不然一靠近怪群危險度就超過門檻，整局都在「躲避」，小圈根本繞不起來。首領、地面預警照樣躲
+    if (S.farm) fear = Math.min(fear, 0.08);
 
     const near = [];
     for (const e of ns.EnemyMgr.all()) {
@@ -725,7 +754,9 @@
     const hazFrac = h => Math.min(1, (h.pct ? Math.max(h.dmg || 0, p.maxHp * h.pct) : (h.dmg || 0)) * (h.pure ? 1 : red) / p.maxHp);
     // 扣 10% 血 ≈ 成本 9~16，血越少越在意。被小怪碰一下（有無敵時間、不會疊加）在血量健康時不太在意，
     // 不然撿光球時每隻迎面走來的怪都會讓人轉頭閃一下又轉回來（抽搐）
-    const DMG_W = hpPct < 0.6 ? 160 : 90, TOUCH_W = hpPct < 0.35 ? 160 : hpPct < 0.6 ? 100 : 30;
+    const DMG_W = hpPct < 0.6 ? 160 : 90, TOUCH_W = S.farm ? 8 : hpPct < 0.35 ? 160 : hpPct < 0.6 ? 100 : 30;
+    // 子彈的危險度：養怪時照實際傷害打折（小怪的子彈扣 2% 血只算三成多），痛的（首領）照舊
+    const shotW = sh => S.farm ? Math.min(1, 0.2 + 8 * hitFrac(sh.dmg, false)) : 1;
     const danger = (x, y, tAhead) => {
       let c = 0, big = 0, worst = 0, haz = 0;
       for (const e of near) {
@@ -745,7 +776,7 @@
       for (const s of shots) {
         const sx = s.x + (s.vx || 0) * tAhead, sy = s.y + (s.vy || 0) * tAhead;
         const d = Math.hypot(x - sx, y - sy) - (s.r || 6) - p.r;
-        big += 6 * Math.exp(-Math.max(d, -10) / 30);
+        big += 6 * shotW(s) * Math.exp(-Math.max(d, -10) / 30);
         worst = Math.max(worst, Math.exp(-Math.max(0, d) / 20) * Math.max(0.03, hitFrac(s.dmg, false)));
       }
       for (const h of hazards) if (!h.hit && inHazard(h, x, y, p.r)) { big += 25; haz += hazFrac(h); }
@@ -921,7 +952,7 @@
     // 緊急時選定一個閃避方向就維持 0.25 秒，除非那個方向明顯變更危險；
     // 以前緊急時會每幀重選，兩個差不多的閃避方向來回跳，人就原地抽搐吃招
     let urgent = 0;
-    for (const sh of shots) urgent += 6 * Math.exp(-Math.max(Math.hypot(p.x - sh.x, p.y - sh.y) - (sh.r || 6) - p.r, -10) / 30);
+    for (const sh of shots) urgent += 6 * shotW(sh) * Math.exp(-Math.max(Math.hypot(p.x - sh.x, p.y - sh.y) - (sh.r || 6) - p.r, -10) / 30);
     for (const h of hazards) if (!h.hit && inHazard(h, p.x, p.y, p.r + 4)) urgent += 25;
     const emergency = urgent > 4;
     S.holdT -= dt;
@@ -980,6 +1011,40 @@
             if (c < bs) { bs = c; bd = [dx, dy]; }
           }
           if (bd) { S.breakDir = bd; S.breakT = 2.5; best = bd; S.mode = '突圍'; S.dirIdx = -1; }
+        }
+      }
+    }
+
+    // 審判突圍：被傳說逼到場地邊緣、或 220px 內有 3 隻以上傳說時，趁地面預警少、血量還有一半以上，
+    // 挑「前方傳說最少、絕對不碰阿爾宙斯、往場地中間」的方向直接衝出去，衝 1.2 秒中途不重選。
+    // 繞場閃避在牆邊會被一路夾著打，越拖越難出來
+    if (judging && arceus && !emergency) {
+      const ax = arceus.x - p.x, ay = arceus.y - p.y, ad = Math.hypot(ax, ay) || 1;
+      if (S.jBreakT > 0) {
+        S.jBreakT -= dt;
+        const [dx, dy] = S.jBreakDir;
+        if (pathLen(dx, dy, 40) < 24 || (ad < 170 && (ax * dx + ay * dy) / ad > 0.4) || hazardHits(dx, dy) > 0) S.jBreakT = 0;
+        else { best = S.jBreakDir; S.mode = '審判：突圍'; }
+      } else if (S.jCenter && hpPct >= 0.5) {
+        const maxR = (24 - 1.4) * unitPx - p.r - 6;
+        const edgeD = Math.hypot(p.x - S.jCenter.x, p.y - S.jCenter.y);
+        const legs = near.filter(e => e.boss && !e.arceus && Math.hypot(e.x - p.x, e.y - p.y) < 220);
+        const hazNear = hazards.filter(h => !h.hit && inHazard(h, p.x, p.y, 200)).length;
+        if (((edgeD > maxR - 110 && legs.length >= 1) || legs.length >= 3) && hazNear <= 1) {
+          let bd = null, bs = Infinity;
+          for (const [dx, dy] of DIRS) {
+            const reach = pathLen(dx, dy, 160);
+            if (reach < 60) continue;
+            if ((ax * dx + ay * dy) / ad > 0.2 && ad < 320) continue;   // 阿爾宙斯碰一下 40% 以上，那一側不衝
+            let c = (160 - reach) / 20 + hazardHits(dx, dy);
+            for (const e of legs) {
+              const ex = e.x - p.x, ey = e.y - p.y, d = Math.hypot(ex, ey) || 1, cos = (ex * dx + ey * dy) / d;
+              if (cos > 0) c += (0.5 + 10 * hitFrac(e.dmg, false)) * cos * cos * 100 / Math.max(30, d);
+            }
+            c -= 1.5 * (dx * (S.jCenter.x - p.x) + dy * (S.jCenter.y - p.y)) / (edgeD || 1);   // 往中間
+            if (c < bs) { bs = c; bd = [dx, dy]; }
+          }
+          if (bd) { S.jBreakDir = bd; S.jBreakT = 1.2; best = bd; S.mode = '審判：突圍'; S.dirIdx = -1; }
         }
       }
     }
@@ -1288,6 +1353,7 @@
     <label><input type="checkbox" data-o="gacha">回主選單時自動抽獎（用抽獎券）</label>
     <label><input type="checkbox" data-o="autoPartner">自動換最強的寶可夢出戰</label>
   </div></details>
+  <details data-k="histBox"><summary>戰績（最近 5 局）</summary><div class="st" data-k="hist"></div></details>
   <details data-k="buildBox" open><summary data-k="ptitle">畢業配置</summary>
     <div class="chips" data-k="build"></div>
     <div class="row"><select data-k="pool"></select><button data-k="add">加入</button></div>
@@ -1373,6 +1439,11 @@
       const extra = [S.lastPartnerMsg && '夥伴：' + S.lastPartnerMsg, S.lastUpgradeMsg && '強化：' + S.lastUpgradeMsg, S.lastGachaMsg && '抽到：' + S.lastGachaMsg].filter(Boolean);
       const lines = `${run}\n本次掛機 ${mins} 分：${stats.runs} 局，擊倒 ${stats.kills}，金幣 ${stats.coins}`.split('\n').concat(extra);
       $('status').replaceChildren(...lines.map(t => Object.assign(document.createElement('div'), { textContent: t })));
+      const mmss = t => `${Math.floor((t || 0) / 60)}:${String(Math.floor((t || 0) % 60)).padStart(2, '0')}`;
+      const runLine = h => `${mmss(h.time)} Lv${h.level} · 擊倒 ${h.kills} · 金幣 ${h.coins}${h.record ? ' · 新紀錄' : ''}` +
+        (h.judge ? `\n　審判 ${mmss(h.judge.time)} · ${h.judge.bosses} 隻傳說 · 傷害 ${(h.judge.dmg || 0).toLocaleString()}` : '');
+      const hist = (cfg.history || []).slice(0, 5).flatMap(h => runLine(h).split('\n'));
+      if ($('hist').childElementCount !== hist.length || $('hist').textContent !== hist.join('')) $('hist').replaceChildren(...(hist.length ? hist : ['還沒有完成的局']).map(t => Object.assign(document.createElement('div'), { textContent: t })));
     }, 500);
   }
 
