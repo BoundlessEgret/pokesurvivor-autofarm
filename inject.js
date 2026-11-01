@@ -9,22 +9,45 @@
   'use strict';
   const HOOK_KEY = 'Game';
   const STORE_KEY = 'psbot.v1';
-  const VERSION = '1.8.13';   // 改程式時記得跟 manifest.json 一起改，面板標題會顯示，用來確認瀏覽器跑的是不是新版
+  const VERSION = '1.8.14';   // 改程式時記得跟 manifest.json 一起改，面板標題會顯示，用來確認瀏覽器跑的是不是新版
   const log = (...a) => console.log('%c[PSBot]', 'color:#ff8ad8', ...a);
 
   // ---------- 1. 抓命名空間 ----------
+  // 遊戲把所有模組（Game、Input、RunUI…）掛在一個命名空間物件上，不放到 window。
+  // 舊做法：在 Object.prototype 埋 'Game' 的 setter，遊戲寫入 ns.Game 時抓到 ns。
+  // 2026-10-31 起遊戲改用 Object.create(null) 建命名空間（沒有原型，碰不到 Object.prototype），舊做法失效。
+  // 新做法：載入前先包住 Object.create，記下所有「沒有原型」的新物件當候選，等其中一個被填好
+  //（BUILT、LIFT、Game 都在）就接上，接上後立刻還原 Object.create。兩種做法都留著，誰先抓到算誰
+  let booted = false;
+  const start = ns => {
+    if (booted) return; booted = true;
+    if (Object.create === wrappedCreate) Object.create = origCreate;
+    delete Object.prototype[HOOK_KEY];
+    try { boot(ns); } catch (e) { console.error('[PSBot] boot failed', e); }
+  };
   const own = (obj, k, v) => Object.defineProperty(obj, k, { value: v, writable: true, enumerable: true, configurable: true });
   Object.defineProperty(Object.prototype, HOOK_KEY, {
     configurable: true,
     get() { return undefined; },
     set(v) {
       own(this, HOOK_KEY, v);
-      if (this && this.BUILT === true && 'LIFT' in this) {
-        delete Object.prototype[HOOK_KEY];
-        try { boot(this); } catch (e) { console.error('[PSBot] boot failed', e); }
-      }
+      if (this && this.BUILT === true && 'LIFT' in this) start(this);
     },
   });
+  const origCreate = Object.create, nullObjs = [];
+  const wrappedCreate = function create(proto, props) {
+    const o = props === undefined ? origCreate(proto) : origCreate(proto, props);
+    if (proto === null && !booted && nullObjs.length < 200) nullObjs.push(o);
+    return o;
+  };
+  Object.create = wrappedCreate;
+  const poll = setInterval(() => {
+    if (booted) return clearInterval(poll);
+    const ns = nullObjs.find(o => o.BUILT === true && 'LIFT' in o && o[HOOK_KEY]);
+    if (ns) { clearInterval(poll); start(ns); }
+  }, 30);
+  // 30 秒都沒抓到（遊戲又改了）：還原 Object.create，不要一直留著包裝
+  setTimeout(() => { if (!booted) { clearInterval(poll); if (Object.create === wrappedCreate) Object.create = origCreate; console.warn('[PSBot] namespace not found — the game may have changed'); } }, 30000);
 
   // ---------- 2. 設定 ----------
   const DEFAULTS = {
